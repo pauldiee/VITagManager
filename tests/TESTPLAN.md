@@ -150,7 +150,7 @@ VITM-T-NoSuchVM
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
 | T40 | fresh target (or after Remove on LA) | Import Assignments before Definitions | Each entry skipped: "tag not present" / "custom attribute not present"; no errors | |
-| T41 | any | Put a VIFolderManager JSON renamed to `Tags_x.json` in `Backups\` | "is not a VITagManager export", nothing changed | |
+| T41 | any | Put a VIFolderManager JSON renamed to `Tags_x.json` in `Backups\` | "is not a VITagManager export", nothing changed | 2026-11-16 (Claude, fake export with `"Tool": "VIFolderManager"` named `Tags_x_All_*.json`, via `-FilePath`, `VITagManager_2026-11-16_21-29-04.log`): **pass**. "is not a VITagManager export", nothing done; file removed afterwards |
 | T42 | any | `-Content Definitions` on an Assignments-only file | "Not in this export, ignored", nothing to do | 2026-11-16, LA (by accident during T21a: the Definitions file was picked for an Assignments import): **pass**. "Not in this export, ignored: Assignments", "No content selected", nothing changed. Led to a better menu: newest export first, and with `-Content` only matching exports. Log `VITagManager_2026-11-16_20-22-30.log` |
 | T43 | LA | Import as `vifm-test` (no tag privileges) | Each create/assign fails with a warning naming the item; script finishes and disconnects | |
 | T44 | LA | Answer `n` at "Proceed with changes" | "Import cancelled by user", nothing changed | 2026-11-16 (Claude, `n` piped to the prompt, `VITagManager_2026-11-16_21-28-23.log`): **pass**. "Import cancelled by user", nothing changed |

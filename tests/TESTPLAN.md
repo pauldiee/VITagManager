@@ -28,7 +28,7 @@ run (`Connect-VIServer` and `.Version`, `.Build`); labs get redeployed.
 |---|---|---|---|---|
 | **L8** | Home, Workstation | `192.168.2.65`, 8.0 U3k | **none** | Source (vSphere 8). Definitions, and assignments on folders and the datacenter only: no VMs possible |
 | **LA** | Holodeck lab A | `vc-mgmt-a.site-a.vcf.lab`, 9.1.1 | yes | Main target. Twin VMs for the wave tests |
-| **LB** | Holodeck lab B | `vc-mgmt-a.site-a.vcf.two`, 9.0.2 (unclear, check first) | yes | Source with VMs for the wave tests (9.0.2 to 9.1.1) |
+| **LB** | Holodeck lab B | `vc-mgmt-a.site-a.vcf.two`, 9.0.2.0 build 25148086 (checked 2026-11-16) | yes (4) | Source with VMs for the wave tests (9.0.2 to 9.1.1) |
 
 No real migration is needed: a "wave" is simulated by a dummy VM with the
 same name on source and target. The source copy carries the tags and
@@ -40,8 +40,9 @@ folders, VIRM-T roles, VPGM-T port groups) are left alone. Without a
 filter a Definitions import copies *every* category and tag of the source
 (SPM-T-Tier from L8, for example), so **every run below uses
 `-Category 'VITM-T*'`** unless the test says otherwise. Custom attributes
-are not filtered: check before T12 which attributes L8 and LB have
-(`Get-CustomAttribute`) and expect those to be created on LA too.
+are not filtered by `-Category`; system attributes (`com.vmware.*`,
+`com.vrlcm.*`, `AutoDeploy.*`, non-inventory target types) are skipped by
+default, so only the VITM-T attributes should go across.
 
 ## Test set
 
@@ -94,16 +95,18 @@ eye or with `Compare-Object`.
 
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
-| T10 | L8 (source set) | Export `-Content Definitions` | JSON has every category (cardinality, entity types), tag and attribute; non-ASCII names intact (open the file as UTF-8); counts equal `Get-TagCategory`, `Get-Tag`, `Get-CustomAttribute` | |
-| T11 | L8 | Check `VITM-T-Multi` in the JSON | **Verifies an assumption:** what `EntityType` holds for a category without restriction (`All`? empty?). The import filters out `All` | |
+| T10 | L8 (source set) | Export `-Content Definitions` | JSON has every category (cardinality, entity types), tag and attribute; non-ASCII names intact (open the file as UTF-8); counts equal `Get-TagCategory`, `Get-Tag`, `Get-CustomAttribute` | 2026-11-16, L8 (8.0.3 build 25600417), `-Category 'VITM-T*'`: **pass**. 4 categories, 8 tags, as created; `Café ü`, `Ø-Tag` and `& < > "` intact (UTF-8 without BOM); empty description exported as `""`. Log `VITagManager_2026-11-16_19-46-10.log` |
+| T11 | L8 | Check `VITM-T-Multi` in the JSON | **Verifies an assumption:** what `EntityType` holds for a category without restriction (`All`? empty?). The import filters out `All` | 2026-11-16, L8: **pass**. A category without restriction exports `EntityType: ["All"]`, so filtering out `All` on import is right (Lab-verified) |
 | T12a | LA | Import the T10 file `-Content Definitions -DryRun` | "[DryRun] Would create" per missing item; nothing changed (compare before/after) | |
 | T12 | LA | Same, without `-DryRun`, answer `y` | All VITM-T categories, tags, attributes created; compare with L8: same cardinality, entity types, descriptions, attribute target types (global stays global) | |
 | T13 | LA | Run T12 again | Everything "already present", 0 created, 0 failed | |
 | T14 | LA | Change `VITM-T-Single` to Multiple on LA by hand (or create `VITM-T-Drift` differently on both sides), import again | Warning "exists with different settings", category unchanged | |
 | T15 | LA | Create attribute `VITM-T-Owner` as global on LA beforehand (fresh LA set), import | Warning "different target type", left as is | |
-| T17 | L8 | Export Definitions with `-Category 'VITM-T*'` and once without | With: only VITM-T categories and tags, attributes all present, `CategoryFilter` in the JSON; without: SPM-T-Tier and others too |
-| T18 | L8 | `-Category 'NoSuch*'` | Warning "No tag category matches 'NoSuch*'"; export with 0 categories |
-| T19 | LA | Import the unfiltered T17 file with `-Category 'VITM-T*' -DryRun` | Only VITM-T items listed; SPM-T-Tier not mentioned |
+| T17 | L8 | Export Definitions with `-Category 'VITM-T*'` and once without | With: only VITM-T categories and tags, attributes all present, `CategoryFilter` in the JSON; without: SPM-T-Tier and others too | 2026-11-16, L8: half done. With the filter: only VITM-T categories and tags; attributes not filtered: 9 exported, 6 of them system attributes (see open points). Unfiltered run still to do |
+| T18 | L8 | `-Category 'NoSuch*'` | Warning "No tag category matches 'NoSuch*'"; export with 0 categories | |
+| T19 | LA | Import the unfiltered T17 file with `-Category 'VITM-T*' -DryRun` | Only VITM-T items listed; SPM-T-Tier not mentioned | |
+| T16a | L8 | Export Definitions again (now with the system-attribute rule), then once with `-IncludeSystemAttributes` | Without: 3 attributes (VITM-T only), log says "Skipped 6 system custom attribute(s)" and lists them in the file; with: all 9, `IncludeSystemAttributes: true` in the JSON | |
+| T16b | LA | Import the `-IncludeSystemAttributes` file from T16a without the switch, `-DryRun` | System attributes not mentioned at all | |
 | T16 | L8 | Can vCenter hold two attributes with the same name and different target types? Try by hand | Note the answer; it decides whether `Find-Field` (exact type first, then name) is enough | |
 
 ### C. Assignments without a VM filter (folders, datacenter)
@@ -161,7 +164,7 @@ VITM-T-NoSuchVM
 ## Order of a full run
 
 1. Check versions of L8, LA, LB; update `labs.md` if they changed.
-2. Test set: `Create -Role Source -FoldersOnly` on L8, `Create -Role Source` on LB, `Create -Role Target` on LA. Note the sets in `labs.md`.
+2. Test set: `Create -Role Source -FoldersOnly` on L8, `Create -Role Source` on LB, `Create -Role Target` on LA. Note the sets in `labs.md`. *Done 2026-11-16 (all three).*
 3. A (T01–T04) on L8.
 4. B (T10–T19): L8 to LA.
 5. C (T20–T24): L8 to LA.
@@ -172,6 +175,13 @@ VITM-T-NoSuchVM
 
 ## Open points
 
+- ~~**System custom attributes.**~~ Done 2026-11-16: skipped by default
+  (names `com.vmware.*`, `com.vrlcm.*`, `AutoDeploy.*`, and target types
+  that are not inventory objects), `-IncludeSystemAttributes` to include
+  them. Found on L8 (T17): 6 of 9 attributes were system ones, including
+  `AutoDeploy.MachineIdentity` and three on `ScheduledTask`; LB has
+  `com.vmware.vcenter.network.folder.externalManaged` and
+  `com.vrlcm.snapshot`. Covered by T16a/T16b.
 - **Custom attributes have no filter.** `-Category` (added 2026-11-16)
   covers the tag part only. If L8 or LB carry attributes of other products,
   they are copied too; add an `-Attribute` filter if that turns out to

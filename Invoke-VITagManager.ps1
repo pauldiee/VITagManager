@@ -63,6 +63,12 @@
     Assignments. Applies to Export and Import alike. Custom attributes are
     not affected.
 
+.PARAMETER IncludeSystemAttributes
+    Also handle the custom attributes that vCenter and other products create
+    and manage themselves: names starting with com.vmware., com.vrlcm. or
+    AutoDeploy., and attributes whose target type is not an inventory object
+    (e.g. ScheduledTask). Skipped by default, on export and import alike.
+
 .PARAMETER BackupDirectory
     Directory used to store exported JSON files (Export) or read them from
     (Import). Defaults to a "Backups" subfolder next to the script.
@@ -133,6 +139,10 @@
         - -VMName / -VMListPath limit Assignments to the VMs of one wave
         - -Category limits the tag part (categories, tags, tag assignments)
           to the named categories, on export and import
+        - System custom attributes skipped by default (names com.vmware.*,
+          com.vrlcm.*, AutoDeploy.*, and target types that are not inventory
+          objects, such as ScheduledTask; seen on vCenter 8.0.3 and VCF
+          9.0.2); -IncludeSystemAttributes handles them anyway
         - Objects matched by type and name; for VMs with a duplicate name the
           exported instance UUID or BIOS UUID breaks the tie
         - Import never removes anything; differing attribute values only
@@ -165,6 +175,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$LogDirectory = '',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeSystemAttributes,
 
     [Parameter(Mandatory = $false)]
     [switch]$OverwriteValues,
@@ -447,6 +460,21 @@ function Test-InCategory {
     return $false
 }
 
+# --- System custom attributes ---------------------------------------------------
+# Created and managed by vCenter and other products (seen on vCenter 8.0.3 and
+# VCF 9.0.2: com.vmware.vcenter.*, com.vmware.vcIntegrity.* on ScheduledTask,
+# com.vrlcm.snapshot, AutoDeploy.MachineIdentity). Skipped unless
+# -IncludeSystemAttributes.
+$systemAttributePrefixes = @('com.vmware.', 'com.vrlcm.', 'AutoDeploy.')
+
+function Test-SystemAttribute {
+    param([string]$Name, $TargetType)
+    if ($IncludeSystemAttributes) { return $false }
+    foreach ($p in $systemAttributePrefixes) { if ($Name.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase)) { return $true } }
+    if ($TargetType -and $entityTypes -notcontains [string]$TargetType) { return $true }
+    return $false
+}
+
 # --- Credential Management ------------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
 if (-not $CredentialPath) { $CredentialPath = Join-Path (Join-Path $scriptDir 'creds') "$safeVc.cred" }
@@ -475,7 +503,8 @@ Write-Log "vCenter:          $vCenterServer"
 Write-Log "Backup Directory: $BackupDirectory"
 Write-Log "Log File:         $LogFile"
 if ($waveActive) { Write-Log "VM filter:        $($vmPatterns.Count) name(s)/pattern(s); Assignments limited to these VMs" }
-if ($categoryActive) { Write-Log "Category filter:  $($categoryPatterns -join ', ') (tags only; custom attributes not filtered)" }
+if ($categoryActive) { Write-Log "Category filter:  $($categoryPatterns -join ', ') (tags only)" }
+Write-Log "System attributes: $(if ($IncludeSystemAttributes) { 'included' } else { 'skipped (use -IncludeSystemAttributes to include them)' })"
 
 Write-Log "Connecting to vCenter: $vCenterServer ..."
 try {
@@ -602,6 +631,7 @@ if ($Mode -eq 'Export') {
             Content       = @($parts)
             VMFilter      = @($vmPatterns)
             CategoryFilter = @($categoryPatterns)
+            IncludeSystemAttributes = [bool]$IncludeSystemAttributes
         }
         $ok = $true
         try {
@@ -631,7 +661,10 @@ if ($Mode -eq 'Export') {
                         Description = $_.Description
                     }
                 })
-                $attributes = @($fields | Sort-Object Name | ForEach-Object {
+                $sysFields = @($fields | Where-Object { Test-SystemAttribute $_.Name $_.ManagedObjectType })
+                foreach ($f in $sysFields) { Write-Log "Skipped system custom attribute '$($f.Name)' ($(Get-FieldTypeLabel $f.ManagedObjectType))" -FileOnly }
+                if ($sysFields.Count -gt 0) { Write-Log "Skipped $($sysFields.Count) system custom attribute(s) (listed in the log file)." }
+                $attributes = @($fields | Where-Object { -not (Test-SystemAttribute $_.Name $_.ManagedObjectType) } | Sort-Object Name | ForEach-Object {
                     [pscustomobject]@{
                         Name       = $_.Name
                         TargetType = if ($_.ManagedObjectType) { [string]$_.ManagedObjectType } else { $null }
@@ -705,6 +738,7 @@ if ($Mode -eq 'Export') {
                         if ([string]::IsNullOrEmpty($val)) { continue }
                         if (-not $fieldById.ContainsKey($key)) { continue }
                         $f = $fieldById[$key]
+                        if (Test-SystemAttribute $f.Name $f.ManagedObjectType) { continue }
                         $attributeValues += [pscustomobject]@{
                             Entity     = Get-EntityRecord $e
                             Attribute  = $f.Name
@@ -879,7 +913,7 @@ if ($Mode -eq 'Import') {
                         }
                     }
 
-                    foreach ($a in @($data.Definitions.CustomAttributes | Where-Object { $null -ne $_ })) {
+                    foreach ($a in @($data.Definitions.CustomAttributes | Where-Object { $null -ne $_ -and -not (Test-SystemAttribute $_.Name $_.TargetType) })) {
                         $label = "'$($a.Name)' ($(Get-FieldTypeLabel $a.TargetType))"
                         $found = Find-Field -Name $a.Name -TargetType $a.TargetType
                         if ($found) {
@@ -919,7 +953,7 @@ if ($Mode -eq 'Import') {
                     $s = @{ TagSet = 0; TagOld = 0; TagNoDef = 0; TagConflict = 0; TagFail = 0; ValSet = 0; ValOld = 0; ValDiff = 0; ValNoDef = 0; ValFail = 0; NotFound = 0; Ambiguous = 0 }
 
                     $tagEntries = @($data.Assignments.TagAssignments | Where-Object { $null -ne $_ -and (Test-InCategory $_.Category) })
-                    $valEntries = @($data.Assignments.AttributeValues | Where-Object { $null -ne $_ })
+                    $valEntries = @($data.Assignments.AttributeValues | Where-Object { $null -ne $_ -and -not (Test-SystemAttribute $_.Attribute $_.TargetType) })
                     if ($waveActive) {
                         $tagEntries = @($tagEntries | Where-Object { $_.Entity.Type -eq 'VirtualMachine' -and (Test-InWave $_.Entity.Name) })
                         $valEntries = @($valEntries | Where-Object { $_.Entity.Type -eq 'VirtualMachine' -and (Test-InWave $_.Entity.Name) })

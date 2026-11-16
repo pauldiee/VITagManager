@@ -150,6 +150,8 @@
         - Unexpected errors are written to the log file as well
         - Assignments import no longer stops with "Argument types do not
           match" (PowerShell 7.6.10 fails on @() around a List[object])
+        - Import summary counts assignments and values skipped because the
+          object was not found or ambiguous, and shows the total in scope
         - Import file menu lists the newest export first and, with -Content,
           only the exports that hold that content
         - Global custom attributes (no target type) are created with a real
@@ -981,7 +983,7 @@ if ($Mode -eq 'Import') {
                 # ---------------------------------------------------------------
                 if ($parts -contains 'Assignments') {
                     Write-Log '--- Assignments ---'
-                    $s = @{ TagSet = 0; TagOld = 0; TagNoDef = 0; TagConflict = 0; TagFail = 0; ValSet = 0; ValOld = 0; ValDiff = 0; ValNoDef = 0; ValFail = 0; NotFound = 0; Ambiguous = 0 }
+                    $s = @{ TagSet = 0; TagOld = 0; TagNoDef = 0; TagConflict = 0; TagFail = 0; ValSet = 0; ValOld = 0; ValDiff = 0; ValNoDef = 0; ValFail = 0; NotFound = 0; Ambiguous = 0; TagNoObj = 0; ValNoObj = 0 }
 
                     $tagEntries = @($data.Assignments.TagAssignments | Where-Object { $null -ne $_ -and (Test-InCategory $_.Category) })
                     $valEntries = @($data.Assignments.AttributeValues | Where-Object { $null -ne $_ -and -not (Test-SystemAttribute $_.Attribute $_.TargetType) })
@@ -1059,7 +1061,7 @@ if ($Mode -eq 'Import') {
 
                     foreach ($ta in $tagEntries) {
                         $e = Resolve-Entity $ta.Entity
-                        if (-not $e) { continue }
+                        if (-not $e) { $s.TagNoObj++; continue }
                         $label = "tag '$($ta.Category)/$($ta.Tag)' on $($e.Type) '$($e.Name)'"
                         $key = "$($ta.Category)|$($ta.Tag)"
                         if (-not $tagByKey.ContainsKey($key)) {
@@ -1107,7 +1109,7 @@ if ($Mode -eq 'Import') {
 
                     foreach ($av in $valEntries) {
                         $e = Resolve-Entity $av.Entity
-                        if (-not $e) { continue }
+                        if (-not $e) { $s.ValNoObj++; continue }
                         $label = "attribute '$($av.Attribute)' on $($e.Type) '$($e.Name)'"
                         $field = Find-Field -Name $av.Attribute -TargetType $av.TargetType
                         if (-not $field) {
@@ -1140,8 +1142,8 @@ if ($Mode -eq 'Import') {
                     }
 
                     Write-Log "Objects: $($s.NotFound) not found on this vCenter (listed in the log file), $($s.Ambiguous) ambiguous name."
-                    Write-Log "Tag assignments: $($s.TagSet) ${verb}assigned, $($s.TagOld) already present, $($s.TagNoDef) tag missing, $($s.TagConflict) single-cardinality conflict, $($s.TagFail) failed."
-                    Write-Log "Attribute values: $($s.ValSet) ${verb}set, $($s.ValOld) already equal, $($s.ValDiff) different (left as is), $($s.ValNoDef) attribute missing, $($s.ValFail) failed."
+                    Write-Log "Tag assignments: $($s.TagSet) ${verb}assigned, $($s.TagOld) already present, $($s.TagNoDef) tag missing, $($s.TagConflict) single-cardinality conflict, $($s.TagNoObj) object not found or ambiguous, $($s.TagFail) failed (of $($tagEntries.Count))."
+                    Write-Log "Attribute values: $($s.ValSet) ${verb}set, $($s.ValOld) already equal, $($s.ValDiff) different (left as is), $($s.ValNoDef) attribute missing, $($s.ValNoObj) object not found or ambiguous, $($s.ValFail) failed (of $($valEntries.Count))."
                 }
 
                 if ($DryRun) { Write-Log 'Dry run: nothing was changed.' -Level WARNING }

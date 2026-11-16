@@ -29,12 +29,13 @@ When a VM moves to another vCenter with cross vCenter vMotion, *"the tags on the
 
 Pass `-Category` (names or wildcards) to limit the tag part to some categories: the categories and their tags in Definitions, the tag assignments in Assignments. It works the same on export and import, so you can also import part of a full export. Custom attributes are not filtered by `-Category`.
 
-Custom attributes that vCenter and other products create and manage themselves are skipped by default, on export and import alike: names starting with `com.vmware.`, `com.vrlcm.` or `AutoDeploy.`, and attributes whose target type is not an inventory object (such as `ScheduledTask`). Pass `-IncludeSystemAttributes` to handle them anyway. Skipped attributes are listed in the log file.
+Custom attributes that vCenter and other products create and manage themselves are skipped by default, on export and import alike: names starting with `com.vmware.`, `com.vrlcm.`, `AutoDeploy.` or `VMSP-`, and attributes whose target type is not an inventory object (such as `ScheduledTask`). Pass `-IncludeSystemAttributes` to handle them anyway. Skipped attributes are listed in the log file.
 
 | Seen on | System attributes |
 |---|---|
 | vCenter 8.0.3 | `AutoDeploy.MachineIdentity`, `com.vmware.vcenter.cluster.edrs.upgradeHostAdded`, `com.vmware.vcenter.network.folder.externalManaged`, three `com.vmware.vcIntegrity.customField.scheduledTask.*` |
 | VCF 9.0.2 vCenter | `com.vmware.vcenter.network.folder.externalManaged`, `com.vrlcm.snapshot` (seen in the vSphere Client; full list not yet exported) |
+| VCF 9.1.1 vCenter | `VMSP-OVA-SHA256` (VirtualMachine, no values in the lab; which component creates it is not verified) |
 
 ### Export
 

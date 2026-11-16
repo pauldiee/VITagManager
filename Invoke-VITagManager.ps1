@@ -65,8 +65,8 @@
 
 .PARAMETER IncludeSystemAttributes
     Also handle the custom attributes that vCenter and other products create
-    and manage themselves: names starting with com.vmware., com.vrlcm. or
-    AutoDeploy., and attributes whose target type is not an inventory object
+    and manage themselves: names starting with com.vmware., com.vrlcm.,
+    AutoDeploy. or VMSP-, and attributes whose target type is not an inventory object
     (e.g. ScheduledTask). Skipped by default, on export and import alike.
 
 .PARAMETER BackupDirectory
@@ -140,9 +140,9 @@
         - -Category limits the tag part (categories, tags, tag assignments)
           to the named categories, on export and import
         - System custom attributes skipped by default (names com.vmware.*,
-          com.vrlcm.*, AutoDeploy.*, and target types that are not inventory
-          objects, such as ScheduledTask; seen on vCenter 8.0.3 and VCF
-          9.0.2); -IncludeSystemAttributes handles them anyway
+          com.vrlcm.*, AutoDeploy.*, VMSP-*, and target types that are not
+          inventory objects, such as ScheduledTask; seen on vCenter 8.0.3,
+          VCF 9.0.2 and 9.1.1); -IncludeSystemAttributes handles them anyway
         - Objects matched by type and name; for VMs with a duplicate name the
           exported instance UUID or BIOS UUID breaks the tie
         - Import never removes anything; differing attribute values only
@@ -480,9 +480,10 @@ function Test-InCategory {
 # --- System custom attributes ---------------------------------------------------
 # Created and managed by vCenter and other products (seen on vCenter 8.0.3 and
 # VCF 9.0.2: com.vmware.vcenter.*, com.vmware.vcIntegrity.* on ScheduledTask,
-# com.vrlcm.snapshot, AutoDeploy.MachineIdentity). Skipped unless
-# -IncludeSystemAttributes.
-$systemAttributePrefixes = @('com.vmware.', 'com.vrlcm.', 'AutoDeploy.')
+# com.vrlcm.snapshot, AutoDeploy.MachineIdentity) and VCF 9.1.1 (VMSP-OVA-SHA256,
+# a VirtualMachine attribute without values in the lab; which component creates
+# it is not verified). Skipped unless -IncludeSystemAttributes.
+$systemAttributePrefixes = @('com.vmware.', 'com.vrlcm.', 'AutoDeploy.', 'VMSP-')
 
 function Test-SystemAttribute {
     param([string]$Name, $TargetType)

@@ -182,7 +182,7 @@ VITM-T-NoSuchVM
   `AutoDeploy.MachineIdentity` and three on `ScheduledTask`; LB has
   `com.vmware.vcenter.network.folder.externalManaged` and
   `com.vrlcm.snapshot`. Covered by T16a/T16b.
-- **`VMSP-OVA-SHA256` on LA.** The vSphere Client on LA (9.1.1) shows a
+- ~~**`VMSP-OVA-SHA256` on LA.**~~ Done 2026-11-16: `VMSP-` added to the system prefixes. The vSphere Client on LA (9.1.1) shows a
   custom attribute `VMSP-OVA-SHA256` on every VM (screenshots after T32,
   2026-11-16), empty on the test VMs. It does not match the system rule
   (`com.vmware.*`, `com.vrlcm.*`, `AutoDeploy.*`), so an export from a

@@ -147,6 +147,7 @@
           exported instance UUID or BIOS UUID breaks the tie
         - Import never removes anything; differing attribute values only
           replaced with -OverwriteValues; -DryRun previews all changes
+        - Unexpected errors are written to the log file as well
 #>
 
 param(
@@ -302,6 +303,13 @@ function Write-Log {
         'ERROR'   { Write-Host "  $entry" -ForegroundColor Red    }
         default   { Write-Host "  $entry" -ForegroundColor Cyan   }
     }
+}
+
+# Errors nothing else catches end the script (StrictMode, -ErrorAction Stop);
+# record them in the log file too, not only on the console
+trap {
+    try { Write-Log "Stopped on an unexpected error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Level ERROR } catch { }
+    break
 }
 
 # --- Menu Functions -------------------------------------------------------------
@@ -822,7 +830,7 @@ if ($Mode -eq 'Import') {
             Write-Log "Content: $($parts -join ', '); overwrite differing values: $([bool]$OverwriteValues); dry run: $([bool]$DryRun)"
             $proceed = $true
             if (-not $DryRun) {
-                $answer = (Read-Host "  Proceed with changes on $vCenterServer? (y/N)").Trim()
+                $answer = (Read-Host "  Proceed with changes on ${vCenterServer}? (y/N)").Trim()
                 if ($answer -notmatch '^[Yy]') {
                     Write-Log 'Import cancelled by user.' -Level WARNING
                     $proceed = $false

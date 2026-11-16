@@ -121,7 +121,7 @@ eye or with `Compare-Object`.
 
 ### D. Waves (VMs)
 
-Source LB, target LA. Wave file `wave1.txt`:
+Source LB, target LA. Wave file `tests/wave1.txt` (in the repo):
 
 ```
 # wave 1

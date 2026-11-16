@@ -1,0 +1,6 @@
+# wave 1 (VITagManager test set, see TESTPLAN.md section D)
+VITM-T-VM0*
+
+VITM-T-TPL
+VITM-T-Dup
+VITM-T-NoSuchVM

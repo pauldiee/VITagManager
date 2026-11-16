@@ -149,7 +149,7 @@ VITM-T-NoSuchVM
 
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
-| T40 | fresh target (or after Remove on LA) | Import Assignments before Definitions | Each entry skipped: "tag not present" / "custom attribute not present"; no errors | |
+| T40 | fresh target (or after Remove on LA) | Import Assignments before Definitions | Each entry skipped: "tag not present" / "custom attribute not present"; no errors | 2026-11-16 (Claude): `New-VITagTestSet.ps1 -Mode Remove -DefinitionsOnly` on LA removed the 4 VITM-T categories and 4 attributes (VMs and folders kept); then a dry-run wave import (`VITagManager_2026-11-16_22-26-25.log`): **pass**. 8 "tag missing", 6 "attribute missing", 1 ambiguous Dup (of 9 and 7), each with "import Definitions first", no errors |
 | T41 | any | Put a VIFolderManager JSON renamed to `Tags_x.json` in `Backups\` | "is not a VITagManager export", nothing changed | 2026-11-16 (Claude, fake export with `"Tool": "VIFolderManager"` named `Tags_x_All_*.json`, via `-FilePath`, `VITagManager_2026-11-16_21-29-04.log`): **pass**. "is not a VITagManager export", nothing done; file removed afterwards |
 | T42 | any | `-Content Definitions` on an Assignments-only file | "Not in this export, ignored", nothing to do | 2026-11-16, LA (by accident during T21a: the Definitions file was picked for an Assignments import): **pass**. "Not in this export, ignored: Assignments", "No content selected", nothing changed. Led to a better menu: newest export first, and with `-Content` only matching exports. Log `VITagManager_2026-11-16_20-22-30.log` |
 | T43 | LA | Import as `vifm-test` (no tag privileges) | Each create/assign fails with a warning naming the item; script finishes and disconnects | 2026-11-16: first attempt could not even connect: `vifm-test` lacked `System.View` on the vCenter root (`group-d1`); the tool logged the error and stopped. Paul gave `vifm-test` Read-only on the LA vCenter root (propagate; **remove in T50**). Then, with `-Category 'SPM-T*'` on the unfiltered L8 file: dry run (`VITagManager_2026-11-16_22-13-49.log`) would create SPM-T-Tier and 3 tags; real run (`VITagManager_2026-11-16_22-13-59.log`): **pass**. "Could not create category 'SPM-T-Tier': ...unauthorized...", the 3 tags skipped as "category not present", clean finish, nothing changed. The error text is the raw vAPI message |
@@ -159,7 +159,7 @@ VITM-T-NoSuchVM
 
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
-| T50 | L8, LA, LB | `New-VITagTestSet.ps1 -Mode Remove` | All VITM-T objects gone; other test sets untouched. Remove anything a Definitions import copied from other sets (SPM-T-Tier on LA) by hand, or avoid it (see open points) | |
+| T50 | L8, LA, LB | `New-VITagTestSet.ps1 -Mode Remove` | All VITM-T objects gone; other test sets untouched. Remove anything a Definitions import copied from other sets (SPM-T-Tier on LA) by hand, or avoid it (see open points) | 2026-11-16 (Claude): **pass** on LA and LB. Both: template, 7 VMs (incl. both Dups) and the 5 VITM-T folders removed; LB also its 4 categories and 3 attributes (LA's went in T40). Check: a `-Category 'VITM-T*'` export of each finds 0 categories, 0 tags, 0 attributes. **L8 kept on purpose** (Paul): VITM-T categories, tags, attributes (incl. `VITM-T-Drift`) and folders. Still for Paul: remove the Read-only permission of `vifm-test` on the LA root (T43). `creds/vifm-test-lab-a.cred` deleted |
 
 ## Order of a full run
 

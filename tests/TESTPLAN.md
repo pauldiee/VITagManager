@@ -136,10 +136,10 @@ VITM-T-NoSuchVM
 |---|---|---|---|---|
 | T30 | LB | Export `-Content Assignments -VMListPath wave1.txt` | Only VITM-T VMs and the template; comment and empty line ignored; warning "No VM matches 'VITM-T-NoSuchVM'"; both `Dup` copies with their UUIDs | 2026-11-16, LB (9.0.2 build 25148086), `-Category 'VITM-T*' -VMListPath tests/wave1.txt`: **pass**. 4 patterns read (comment and empty line ignored), 7 VMs in scope (VM01-VM04, TPL, both Dup), warning "No VM matches 'VITM-T-NoSuchVM'". 9 tag assignments and 7 values, exactly the test set (VM04 has none); the two Dup copies carry different instance UUIDs; `Café ü` intact (UTF-8). Log `VITagManager_2026-11-16_20-37-05.log` |
 | T31 | LA | Import Definitions from LB first (or reuse T12), then Assignments `-VMListPath wave1.txt -DryRun` | Would-assign / would-set per VM; nothing changed | 2026-11-16, LB export into LA after Arrange (`VITagManager_2026-11-16_20-44-19.log`): **pass**, numbers exactly as predicted. Tags: 7 would be assigned, 1 single-cardinality conflict, 1 object not found or ambiguous (of 9). Values: 5 would be set, 1 different, 1 object not found or ambiguous (of 7). First run showing the new counter |
-| T32 | LA | Same, real | VM01, VM03 (except Owner), TPL get their tags and values; VM04 gets nothing (had none) | |
-| T33 | LA | Check VM02 | Skipped: single-cardinality conflict (`Silver` already there), `Silver` stays | 2026-11-16, dry run T31: **pass** so far. "Skipped tag 'VITM-T-Single/Gold' on VM02: category allows one tag per object and 'Silver' is already assigned". Check after T32 that Silver stayed |
-| T34 | LA | Check VM03 Owner | Kept at `team-b` with a warning; rerun with `-OverwriteValues`: becomes `team-a` | |
-| T35 | LA | Check `VITM-T-Dup` | The twin with the matching UUID gets the tags of its source copy; the other source copy's entries are skipped as ambiguous | 2026-11-16, dry run T31: **pass** so far. Arrange created the second Dup with the source's instance UUID (vCenter 9.1.1 kept it). The `dup-prod` record resolved to one VM (App-A, Owner dup-prod); the `dup-test` record matched neither UUID and was skipped as "2 objects with this name". The log line does not say *which* Dup was chosen; check in the vSphere Client after T32 that the Dup in `Test` got App-A |
+| T32 | LA | Same, real | VM01, VM03 (except Owner), TPL get their tags and values; VM04 gets nothing (had none) | 2026-11-16 (`VITagManager_2026-11-16_20-52-07.log`): **pass**. Same numbers as the T31 dry run: 7 tags assigned, 5 values set (of 9 and 7). Checked in the vSphere Client: VM02, VM03 and the picked Dup as expected (see T33-T35) |
+| T33 | LA | Check VM02 | Skipped: single-cardinality conflict (`Silver` already there), `Silver` stays | 2026-11-16, dry run T31: **pass** so far. "Skipped tag 'VITM-T-Single/Gold' on VM02: category allows one tag per object and 'Silver' is already assigned". Check after T32 that Silver stayed After T32 (vSphere Client): **pass**. VM02 has Silver (Single) and Gold (Multi); Single/Gold was not added. |
+| T34 | LA | Check VM03 Owner | Kept at `team-b` with a warning; rerun with `-OverwriteValues`: becomes `team-a` | 2026-11-16, first half: **pass**. After T32 VM03 still has Owner `team-b` (vSphere Client), with the warning in the log. `-OverwriteValues` run still to do |
+| T35 | LA | Check `VITM-T-Dup` | The twin with the matching UUID gets the tags of its source copy; the other source copy's entries are skipped as ambiguous | 2026-11-16, dry run T31: **pass** so far. Arrange created the second Dup with the source's instance UUID (vCenter 9.1.1 kept it). The `dup-prod` record resolved to one VM (App-A, Owner dup-prod); the `dup-test` record matched neither UUID and was skipped as "2 objects with this name". The log line does not say *which* Dup was chosen; check in the vSphere Client after T32 that the Dup in `Test` got App-A After T32: **pass**. Log: "picked vm-1254 by instance UUID 5007b1de-…" (new log line, commit 1ce88e5); that Dup has App-A and Owner `dup-prod` in the vSphere Client. |
 | T36 | LA | Run T32 again | All "already present" / "already equal", 0 assigned | |
 | T37 | LA | Import the full T30 file with `-VMName VITM-T-VM01` | Only VM01 in scope ("VM filter: n tag assignment(s)") | |
 | T38 | LA | `-VMName 'VITM-T-*'` instead of a file | Same result as the file | |
@@ -182,6 +182,13 @@ VITM-T-NoSuchVM
   `AutoDeploy.MachineIdentity` and three on `ScheduledTask`; LB has
   `com.vmware.vcenter.network.folder.externalManaged` and
   `com.vrlcm.snapshot`. Covered by T16a/T16b.
+- **`VMSP-OVA-SHA256` on LA.** The vSphere Client on LA (9.1.1) shows a
+  custom attribute `VMSP-OVA-SHA256` on every VM (screenshots after T32,
+  2026-11-16), empty on the test VMs. It does not match the system rule
+  (`com.vmware.*`, `com.vrlcm.*`, `AutoDeploy.*`), so an export from a
+  9.1 vCenter would carry it. What creates it is not verified (the name
+  suggests the VCF 9.1 services platform); check its target type and
+  whether it holds values before adding it to the list.
 - **Custom attributes have no filter.** `-Category` (added 2026-11-16)
   covers the tag part only. If L8 or LB carry attributes of other products,
   they are copied too; add an `-Attribute` filter if that turns out to

@@ -803,7 +803,9 @@ if ($Mode -eq 'Import') {
     }
 
     if ($data) {
-        Write-Log "Export file: $($fileChoice.Name) (from $($data.SourceVCenter), exported $($data.ExportedAt))"
+        # ConvertFrom-Json turns the ISO timestamp into a DateTime; show it culture-neutral
+        $exportedAt = if ($data.ExportedAt -is [datetime]) { $data.ExportedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { "$($data.ExportedAt)" }
+        Write-Log "Export file: $($fileChoice.Name) (from $($data.SourceVCenter), exported $exportedAt)"
         $available = @('Definitions', 'Assignments' | Where-Object { $data.PSObject.Properties.Name -contains $_ })
         if ($contentChosen) {
             $parts   = @($contentChosen | Where-Object { $available -contains $_ })
@@ -855,18 +857,19 @@ if ($Mode -eq 'Import') {
                     foreach ($c in @($data.Definitions.TagCategories | Where-Object { $null -ne $_ -and (Test-InCategory $_.Name) })) {
                         # 'All' (no restriction) is the default of New-TagCategory
                         $entityType = @($c.EntityType | Where-Object { $_ -and $_ -ne 'All' })
+                        $typeLabel  = if ($entityType.Count -gt 0) { $entityType -join ', ' } else { 'no restriction' }
                         if ($catByName.ContainsKey($c.Name)) {
                             $s.CatOld++
                             $cur = $catByName[$c.Name]
                             $curTypes = @($cur.EntityType | ForEach-Object { "$_" } | Where-Object { $_ -and $_ -ne 'All' } | Sort-Object)
                             if ("$($cur.Cardinality)" -ne $c.Cardinality -or (($curTypes -join ',') -ne ((@($entityType | Sort-Object)) -join ','))) {
                                 $s.CatDiff++
-                                Write-Log "Category '$($c.Name)' exists with different settings: target $($cur.Cardinality) [$($curTypes -join ', ')], export $($c.Cardinality) [$($entityType -join ', ')]. Left as is." -Level WARNING
+                                Write-Log "Category '$($c.Name)' exists with different settings: target $($cur.Cardinality) [$($curTypes -join ', ')], export $($c.Cardinality) [$typeLabel]. Left as is." -Level WARNING
                             }
                             continue
                         }
                         if ($DryRun) {
-                            Write-Log "[DryRun] Would create category '$($c.Name)' ($($c.Cardinality), $($entityType -join ', '))"
+                            Write-Log "[DryRun] Would create category '$($c.Name)' ($($c.Cardinality), $typeLabel)"
                             $s.CatNew++
                             continue
                         }
@@ -875,7 +878,7 @@ if ($Mode -eq 'Import') {
                             if ($c.Description) { $newArgs.Description = $c.Description }
                             if ($entityType.Count -gt 0) { $newArgs.EntityType = $entityType }
                             $catByName[$c.Name] = New-TagCategory @newArgs
-                            Write-Log "Created category '$($c.Name)' ($($c.Cardinality), $($entityType -join ', '))" -Level SUCCESS
+                            Write-Log "Created category '$($c.Name)' ($($c.Cardinality), $typeLabel)" -Level SUCCESS
                             $s.CatNew++
                         } catch {
                             Write-Log "Could not create category '$($c.Name)': $(Get-ErrorDetail $_)" -Level WARNING

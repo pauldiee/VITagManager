@@ -134,7 +134,7 @@ VITM-T-NoSuchVM
 
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
-| T30 | LB | Export `-Content Assignments -VMListPath wave1.txt` | Only VITM-T VMs and the template; comment and empty line ignored; warning "No VM matches 'VITM-T-NoSuchVM'"; both `Dup` copies with their UUIDs | |
+| T30 | LB | Export `-Content Assignments -VMListPath wave1.txt` | Only VITM-T VMs and the template; comment and empty line ignored; warning "No VM matches 'VITM-T-NoSuchVM'"; both `Dup` copies with their UUIDs | 2026-11-16, LB (9.0.2 build 25148086), `-Category 'VITM-T*' -VMListPath tests/wave1.txt`: **pass**. 4 patterns read (comment and empty line ignored), 7 VMs in scope (VM01-VM04, TPL, both Dup), warning "No VM matches 'VITM-T-NoSuchVM'". 9 tag assignments and 7 values, exactly the test set (VM04 has none); the two Dup copies carry different instance UUIDs; `Café ü` intact (UTF-8). Log `VITagManager_2026-11-16_20-37-05.log` |
 | T31 | LA | Import Definitions from LB first (or reuse T12), then Assignments `-VMListPath wave1.txt -DryRun` | Would-assign / would-set per VM; nothing changed | |
 | T32 | LA | Same, real | VM01, VM03 (except Owner), TPL get their tags and values; VM04 gets nothing (had none) | |
 | T33 | LA | Check VM02 | Skipped: single-cardinality conflict (`Silver` already there), `Silver` stays | |

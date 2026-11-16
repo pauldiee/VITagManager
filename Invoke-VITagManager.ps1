@@ -82,6 +82,14 @@
     different value on the target. Without it such values are reported and
     left alone.
 
+.PARAMETER FilePath
+    Import mode: the export file to import, instead of picking one from the
+    backup directory. For scripted runs.
+
+.PARAMETER Force
+    Import mode: do not ask for confirmation before changing anything. For
+    scripted runs; try the same command with -DryRun first.
+
 .PARAMETER DryRun
     Import mode: log what would be created, assigned and set without
     changing anything.
@@ -153,6 +161,8 @@
         - Import summary counts assignments and values skipped because the
           object was not found or ambiguous, and shows the total in scope
         - The log names the VM picked by UUID when a name occurs more than once
+        - -FilePath and -Force for scripted imports (no file menu, no
+          confirmation)
         - Import file menu lists the newest export first and, with -Content,
           only the exports that hold that content
         - Global custom attributes (no target type) are created with a real
@@ -194,6 +204,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$DryRun,
+
+    [Parameter(Mandatory = $false)]
+    [string]$FilePath = '',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Force,
 
     [Parameter(Mandatory = $false)]
     [string]$CredentialPath = '',
@@ -445,8 +461,8 @@ if (-not $Mode) {
     $Mode = $modeChoice.Value
 }
 
-if ($Mode -ne 'Import' -and ($DryRun -or $OverwriteValues)) {
-    Write-Host '  [WARN] -DryRun and -OverwriteValues only apply in Import mode and will be ignored.' -ForegroundColor Yellow
+if ($Mode -ne 'Import' -and ($DryRun -or $OverwriteValues -or $FilePath -or $Force)) {
+    Write-Host '  [WARN] -DryRun, -OverwriteValues, -FilePath and -Force only apply in Import mode and will be ignored.' -ForegroundColor Yellow
 }
 
 # --- Wave (VM filter) -----------------------------------------------------------
@@ -807,7 +823,14 @@ if ($Mode -eq 'Import') {
         })
     }
     $fileChoice = $null
-    if ($allJson.Count -eq 0) {
+    if ($FilePath) {
+        if (Test-Path -Path $FilePath -PathType Leaf) {
+            $fileChoice = Get-Item -Path $FilePath
+        } else {
+            Write-Log "-FilePath not found: $FilePath" -Level ERROR
+        }
+    }
+    elseif ($allJson.Count -eq 0) {
         Write-Log "No Tags_*.json files$(if ($contentChosen) { " with $($contentChosen -join '/')" }) found in '$BackupDirectory'. Nothing to import." -Level WARNING
     }
     else {
@@ -851,7 +874,7 @@ if ($Mode -eq 'Import') {
         else {
             Write-Log "Content: $($parts -join ', '); overwrite differing values: $([bool]$OverwriteValues); dry run: $([bool]$DryRun)"
             $proceed = $true
-            if (-not $DryRun) {
+            if (-not $DryRun -and -not $Force) {
                 $answer = (Read-Host "  Proceed with changes on ${vCenterServer}? (y/N)").Trim()
                 if ($answer -notmatch '^[Yy]') {
                     Write-Log 'Import cancelled by user.' -Level WARNING

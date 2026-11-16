@@ -97,6 +97,8 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host: [Jump Host: PowerShell 
 | `-BackupDirectory` | Where JSON files are written and read. Default: `Backups\` next to the script |
 | `-LogDirectory` | Default: `Logs\` next to the script |
 | `-OverwriteValues` | Import: replace attribute values that differ on the target |
+| `-FilePath` | Import: the export file to import, instead of the menu |
+| `-Force` | Import: no confirmation question (scripted runs; try `-DryRun` first) |
 | `-DryRun` | Import: show what would change, change nothing |
 | `-CredentialPath` | Default: `creds\<vCenterServer>.cred` next to the script |
 | `-ResetCredentials` | Prompt for new credentials |

@@ -148,6 +148,8 @@
         - Import never removes anything; differing attribute values only
           replaced with -OverwriteValues; -DryRun previews all changes
         - Unexpected errors are written to the log file as well
+        - Import file menu lists the newest export first and, with -Content,
+          only the exports that hold that content
         - Global custom attributes (no target type) are created with a real
           null type; PowerShell's $null became "" and vCenter refused it
 #>
@@ -789,13 +791,25 @@ if ($Mode -eq 'Import') {
         Disconnect-VIServer -Server $viConn -Confirm:$false
         exit 1
     }
-    $allJson = @(Get-ChildItem -Path $BackupDirectory -Filter 'Tags_*.json' | Sort-Object Name)
+    # Newest first; with -Content only the exports that hold that content
+    # (file names end in _Definitions_, _Assignments_ or _All_ plus a timestamp)
+    $allJson = @(Get-ChildItem -Path $BackupDirectory -Filter 'Tags_*.json' | Sort-Object LastWriteTime -Descending)
+    if ($contentChosen) {
+        $allJson = @($allJson | Where-Object {
+            $kind = if ($_.Name -match '_(Definitions|Assignments|All)_\d{4}-\d{2}-\d{2}_') { $Matches[1] } else { 'All' }
+            $kind -eq 'All' -or @($contentChosen | Where-Object { $_ -eq $kind }).Count -gt 0
+        })
+    }
     $fileChoice = $null
     if ($allJson.Count -eq 0) {
-        Write-Log "No Tags_*.json files found in '$BackupDirectory'. Nothing to import." -Level WARNING
+        Write-Log "No Tags_*.json files$(if ($contentChosen) { " with $($contentChosen -join '/')" }) found in '$BackupDirectory'. Nothing to import." -Level WARNING
     }
     else {
-        $fileChoice = Select-SingleItem -Items $allJson -DisplayProperty 'Name' -Title 'Select export to IMPORT'
+        $fileItems = @(for ($i = 0; $i -lt $allJson.Count; $i++) {
+            [pscustomobject]@{ Label = "$($allJson[$i].Name)$(if ($i -eq 0) { '  [newest]' })"; File = $allJson[$i] }
+        })
+        $picked = Select-SingleItem -Items $fileItems -DisplayProperty 'Label' -Title 'Select export to IMPORT'
+        if ($picked) { $fileChoice = $picked.File }
     }
 
     $data = $null

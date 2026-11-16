@@ -1,4 +1,5 @@
 #Requires -Version 7.4
+
 <#
 .SYNOPSIS
     Export and import vSphere tags and custom attributes: the definitions
@@ -130,16 +131,18 @@
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
-    Tested   : Not yet tested
+    Tested   : Lab, 2026-11-16: vCenter 8.0.3 to VCF 9.1.1 and VCF 9.0.2 to
+               9.1.1 (definitions, folder and VM wave assignments); see
+               tests/TESTPLAN.md
+    Credit   : The split between definitions (carried over once) and assignments
+               (captured per wave, right before the move) follows Jim Millard,
+               "Migrating tags after cross-vCenter vMotion" (Copy-vcTags.ps1 and
+               Migrate-vcTags.ps1):
+               https://blog.millard.org/2026/05/migrating-tags-after-cross-vcenter.html
+#>
 
-.CREDIT
-    The split between definitions (carried over once) and assignments
-    (captured per wave, right before the move) follows Jim Millard,
-    "Migrating tags after cross-vCenter vMotion" (Copy-vcTags.ps1 and
-    Migrate-vcTags.ps1):
-    https://blog.millard.org/2026/05/migrating-tags-after-cross-vcenter.html
-
-.CHANGELOG
+<#
+CHANGELOG
     v0.1.0  2026-11-16  Paul van Dieen
         - Initial version, not yet tested: export/import of tag categories,
           tags and custom attribute names (Definitions) and of tag
@@ -163,6 +166,9 @@
         - The log names the VM picked by UUID when a name occurs more than once
         - -FilePath and -Force for scripted imports (no file menu, no
           confirmation)
+        - Get-Help works: blank line after #Requires, changelog in its own
+          comment block, credit in .NOTES (Get-Help ignores a help block with
+          unknown keywords such as .CHANGELOG)
         - Import file menu lists the newest export first and, with -Content,
           only the exports that hold that content
         - Global custom attributes (no target type) are created with a real

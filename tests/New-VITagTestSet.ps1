@@ -1,4 +1,5 @@
 #Requires -Version 7.4
+
 <#
 .SYNOPSIS
     Builds, arranges and removes a throwaway test set for testing
@@ -77,7 +78,10 @@
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ or VMware.PowerCLI 13+
     Tested   : Not yet tested
 
-.CHANGELOG
+#>
+
+<#
+CHANGELOG
     v0.1.0  2026-11-16  Paul van Dieen
         - Initial version: Create (Source/Target), Arrange (Target) and
           Remove of a lab test set for Invoke-VITagManager.ps1

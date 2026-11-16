@@ -35,7 +35,7 @@ Custom attributes that vCenter and other products create and manage themselves a
 |---|---|
 | vCenter 8.0.3 | `AutoDeploy.MachineIdentity`, `com.vmware.vcenter.cluster.edrs.upgradeHostAdded`, `com.vmware.vcenter.network.folder.externalManaged`, three `com.vmware.vcIntegrity.customField.scheduledTask.*` |
 | VCF 9.0.2 vCenter | `com.vmware.vcenter.network.folder.externalManaged`, `com.vrlcm.snapshot` (seen in the vSphere Client; full list not yet exported) |
-| VCF 9.1.1 vCenter | `VMSP-OVA-SHA256` (VirtualMachine, no values in the lab; which component creates it is not verified) |
+| VCF 9.1.1 vCenter | `VMSP-OVA-SHA256` (VirtualMachine, no values in the lab; which component creates it is not verified), `com.vmware.vcf.sddcManager.taskId` (target type Task), plus the six seen on 8.0.3 |
 
 ### Export
 

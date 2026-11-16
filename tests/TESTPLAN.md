@@ -190,6 +190,11 @@ VITM-T-NoSuchVM
   suggests the VCF 9.1 services platform). Checked 2026-11-16 with
   PowerCLI on LA: target type `VirtualMachine`, no VM with a value
   (`Get-VM | Get-Annotation`; templates not included in that check).
+  Paul's expectation (not verified): VMSP is the VCF management services
+  platform, and the attribute holds the OVA hash on those service VMs. No
+  VM on LA had a value, so either LA has no such VMs or the value sits
+  elsewhere. Check on a 9.1 environment that runs the services before
+  writing this down as a fact.
 - **Custom attributes have no filter.** `-Category` (added 2026-11-16)
   covers the tag part only. If L8 or LB carry attributes of other products,
   they are copied too; add an `-Attribute` filter if that turns out to

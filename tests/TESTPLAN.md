@@ -187,8 +187,9 @@ VITM-T-NoSuchVM
   2026-11-16), empty on the test VMs. It does not match the system rule
   (`com.vmware.*`, `com.vrlcm.*`, `AutoDeploy.*`), so an export from a
   9.1 vCenter would carry it. What creates it is not verified (the name
-  suggests the VCF 9.1 services platform); check its target type and
-  whether it holds values before adding it to the list.
+  suggests the VCF 9.1 services platform). Checked 2026-11-16 with
+  PowerCLI on LA: target type `VirtualMachine`, no VM with a value
+  (`Get-VM | Get-Annotation`; templates not included in that check).
 - **Custom attributes have no filter.** `-Category` (added 2026-11-16)
   covers the tag part only. If L8 or LB carry attributes of other products,
   they are copied too; add an `-Attribute` filter if that turns out to

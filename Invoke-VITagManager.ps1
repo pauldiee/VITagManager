@@ -148,6 +148,8 @@
         - Import never removes anything; differing attribute values only
           replaced with -OverwriteValues; -DryRun previews all changes
         - Unexpected errors are written to the log file as well
+        - Global custom attributes (no target type) are created with a real
+          null type; PowerShell's $null became "" and vCenter refused it
 #>
 
 param(
@@ -940,7 +942,9 @@ if ($Mode -eq 'Import') {
                             continue
                         }
                         try {
-                            $moType = if ($a.TargetType) { [string]$a.TargetType } else { $null }
+                            # A global attribute needs a real null: PowerShell turns $null into ""
+                            # for a .NET string parameter, and vCenter rejects "" as an unknown type
+                            $moType = if ($a.TargetType) { [string]$a.TargetType } else { [NullString]::Value }
                             $null = $fieldManager.AddCustomFieldDef([string]$a.Name, $moType, $null, $null)
                             $fieldManager.UpdateViewData('Field')
                             Write-Log "Created custom attribute $label" -Level SUCCESS

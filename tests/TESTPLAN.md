@@ -114,7 +114,7 @@ eye or with `Compare-Object`.
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
 | T20 | L8 | Export `-Content Assignments` | Folder tags and the `VITM-T-Global` value on `VITM-T` are in the JSON; tags on unsupported types (if any) counted as skipped | 2026-11-16, L8, `-Category 'VITM-T*'`: **pass**. 4 tag assignments (Prod, Test, both Web) and 1 value (`VITM-T-Global` = `root-folder` on `VITM-T`) from 40 objects. Folders are recorded by name only, so generic names like `Prod` and `Test` may also match other folders on the target. Log `VITagManager_2026-11-16_20-22-09.log` |
-| T21 | LA (target set, after T12) | Import the T20 file `-DryRun`, then real | `Prod`/`Test` on the unique folders assigned; value on `VITM-T` set | |
+| T21 | LA (target set, after T12) | Import the T20 file `-DryRun`, then real | `Prod`/`Test` on the unique folders assigned; value on `VITM-T` set | 2026-11-16, dry run attempt 1: **fail**, stopped right after "--- Assignments ---": *"Argument types do not match"* at `@($byName[$k])`. PowerShell 7.6.10 throws on `@()` around a `List[object]` (reproduced offline, also without StrictMode); fixed with `.ToArray()`. The new trap logged the line number. Log `VITagManager_2026-11-16_20-25-29.log` |
 | T22 | LA | Same run, check the two `Web` folders | Skipped as ambiguous name, with a warning (known limit of name matching for folders) | |
 | T23 | LA | Same run | Objects that exist only on L8 (other test sets, `Lab-DC`) counted "not found" and listed in the log file only | |
 | T24 | LA | Run T21 again | Everything "already present" / "already equal" | |

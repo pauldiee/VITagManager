@@ -148,6 +148,8 @@
         - Import never removes anything; differing attribute values only
           replaced with -OverwriteValues; -DryRun previews all changes
         - Unexpected errors are written to the log file as well
+        - Assignments import no longer stops with "Argument types do not
+          match" (PowerShell 7.6.10 fails on @() around a List[object])
         - Import file menu lists the newest export first and, with -Content,
           only the exports that hold that content
         - Global custom attributes (no target type) are created with a real
@@ -1012,7 +1014,9 @@ if ($Mode -eq 'Import') {
                             $s.NotFound++
                             Write-Log "Not found on this vCenter: $($Rec.Type) '$($Rec.Name)'" -FileOnly
                         } else {
-                            $cands = @($byName[$k])
+                            # .ToArray(), not @(): PowerShell 7.6 throws "Argument types do not
+                            # match" on @() around a List[object]
+                            $cands = $byName[$k].ToArray()
                             if ($cands.Count -gt 1 -and $Rec.Type -eq 'VirtualMachine') {
                                 foreach ($u in @('InstanceUuid', 'BiosUuid')) {
                                     $want = Get-Prop $Rec $u
@@ -1064,7 +1068,7 @@ if ($Mode -eq 'Import') {
                             continue
                         }
                         $tag = $tagByKey[$key]
-                        $have = if ($currentTags.ContainsKey($e.MoRef.Value)) { @($currentTags[$e.MoRef.Value]) } else { @() }
+                        $have = if ($currentTags.ContainsKey($e.MoRef.Value)) { $currentTags[$e.MoRef.Value].ToArray() } else { @() }
                         if (@($have | Where-Object { $_.Category.Name -eq $ta.Category -and $_.Name -eq $ta.Tag }).Count -gt 0) {
                             $s.TagOld++
                             continue

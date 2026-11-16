@@ -48,6 +48,10 @@
     Datacenter to build the test set in. Defaults to the first datacenter
     that has a connected host (with -FoldersOnly: the first datacenter).
 
+.PARAMETER DefinitionsOnly
+    Remove mode: delete only the VITM-T tag categories (with their tags and
+    assignments) and custom attributes; keep the VMs, template and folders.
+
 .PARAMETER FoldersOnly
     Create mode: no dummy VMs or template, so it works on a vCenter without
     hosts (e.g. the vCenter 8 source).
@@ -83,6 +87,8 @@
 <#
 CHANGELOG
     v0.1.0  2026-11-16  Paul van Dieen
+        - Remove -DefinitionsOnly: categories and attributes only, objects
+          stay (for TESTPLAN T40)
         - Initial version: Create (Source/Target), Arrange (Target) and
           Remove of a lab test set for Invoke-VITagManager.ps1
 #>
@@ -104,6 +110,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$FoldersOnly,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DefinitionsOnly,
 
     [Parameter(Mandatory = $false)]
     [string]$UuidFrom = '',
@@ -392,7 +401,9 @@ try {
 
     # ===========================================================================
     if ($Mode -eq 'Remove') {
-        $marked = Get-MarkedObjects
+        # -DefinitionsOnly keeps VMs and folders (TESTPLAN T40: assignments
+        # import onto objects whose tags and attributes no longer exist)
+        $marked = if ($DefinitionsOnly) { [pscustomobject]@{ VMs = @(); Templates = @() } } else { Get-MarkedObjects }
         foreach ($tm in @($marked.Templates)) {
             if ($null -eq $tm) { continue }
             Remove-Template -Server $vi -Template $tm -DeletePermanently -Confirm:$false
@@ -403,7 +414,7 @@ try {
             Remove-VM -Server $vi -VM $vm -DeletePermanently -Confirm:$false
             Say "Deleted VM $($vm.Name)" Yellow
         }
-        $r = Get-ChildFolder $vmRoot $rootName
+        $r = if ($DefinitionsOnly) { $null } else { Get-ChildFolder $vmRoot $rootName }
         if ($r) { Remove-EmptyFolderTree -Folder $r }
         foreach ($c in @(Get-TagCategory -Server $vi -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$prefix*" })) {
             Remove-TagCategory -Server $vi -Category $c -Confirm:$false

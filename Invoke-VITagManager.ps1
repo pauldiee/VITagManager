@@ -152,6 +152,7 @@
           match" (PowerShell 7.6.10 fails on @() around a List[object])
         - Import summary counts assignments and values skipped because the
           object was not found or ambiguous, and shows the total in scope
+        - The log names the VM picked by UUID when a name occurs more than once
         - Import file menu lists the newest export first and, with -Content,
           only the exports that hold that content
         - Global custom attributes (no target type) are created with a real
@@ -1020,11 +1021,17 @@ if ($Mode -eq 'Import') {
                             # match" on @() around a List[object]
                             $cands = $byName[$k].ToArray()
                             if ($cands.Count -gt 1 -and $Rec.Type -eq 'VirtualMachine') {
+                                $total = $cands.Count
                                 foreach ($u in @('InstanceUuid', 'BiosUuid')) {
                                     $want = Get-Prop $Rec $u
                                     if (-not $want) { continue }
                                     $hit = @($cands | Where-Object { $_.$u -eq $want })
-                                    if ($hit.Count -eq 1) { $cands = $hit; break }
+                                    if ($hit.Count -eq 1) {
+                                        $cands = $hit
+                                        $uLabel = if ($u -eq 'InstanceUuid') { 'instance UUID' } else { 'BIOS UUID' }
+                                        Write-Log "VirtualMachine '$($Rec.Name)': $total objects with this name; picked $($hit[0].MoRef.Value) by $uLabel $want."
+                                        break
+                                    }
                                 }
                             }
                             if ($cands.Count -eq 1) {

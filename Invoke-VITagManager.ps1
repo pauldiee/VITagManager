@@ -73,6 +73,11 @@
 .PARAMETER BackupDirectory
     Directory used to store exported JSON files (Export) or read them from
     (Import). Defaults to a "Backups" subfolder next to the script.
+    Without this parameter an interactive run asks for the directory after
+    the mode: Enter keeps the default, B opens the Windows folder browser,
+    or type a path. Import shows how many exports the folder holds. No
+    prompt in an unattended run (-Content on Export, -FilePath or -Force on
+    Import).
 
 .PARAMETER LogDirectory
     Directory to write log files to. Defaults to a "Logs" subfolder next to
@@ -85,7 +90,12 @@
 
 .PARAMETER FilePath
     Import mode: the export file to import, instead of picking one from the
-    backup directory. For scripted runs.
+    backup directory. A path or a name, wildcards allowed (a bare name is
+    also looked up in the backup directory); when several files match, the
+    newest is used and logged. For scripted runs: with -Content and -Force
+    an import runs without prompts. Without console input every prompt
+    stops the script with a clear message and exit code 2; a run with
+    failures ends with exit code 1.
 
 .PARAMETER Force
     Import mode: do not ask for confirmation before changing anything. For
@@ -122,12 +132,16 @@
     .\Invoke-VITagManager.ps1 -vCenterServer vc-new.lab.local -Mode Import -Content Assignments -VMListPath .\wave1.txt
 
 .EXAMPLE
+    # Scripted, after a wave: the newest Assignments export, no prompts
+    .\Invoke-VITagManager.ps1 -vCenterServer vc-new.lab.local -Mode Import -Content Assignments -FilePath 'Tags_*_Assignments_*.json' -VMListPath .\wave1.txt -Force
+
+.EXAMPLE
     # Only the categories that matter, e.g. those used by storage policies and backup
     .\Invoke-VITagManager.ps1 -vCenterServer vc-old.lab.local -Mode Export -Content Definitions -Category 'Storage*','Backup'
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 0.1.0
+    Version  : 0.2.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -143,6 +157,36 @@
 
 <#
 CHANGELOG
+    v0.2.0  2026-11-18  Paul van Dieen
+        - On par with VDSPortGroupManager 1.6.1 and VIFolderManager 1.3.0 (#2)
+        - Pick the backup directory interactively: without -BackupDirectory,
+          Export and Import ask for it after the mode. Enter keeps the
+          default Backups folder, B opens the Windows folder browser (only
+          where a GUI is available), or type a path. Import shows how many
+          exports the folder holds and asks again when it holds none.
+        - Failures stand out: a category, tag or attribute that can't be
+          created, a tag that can't be assigned, a value that can't be set,
+          an export that fails and an unreadable export file are logged as
+          an ERROR (red) starting with FAILED, with the vCenter message
+          without the PowerShell wrapper. Summaries are red with failures,
+          yellow with only skips (tag or attribute missing, single-
+          cardinality conflict, different value or settings, ambiguous
+          name), green otherwise, and list every failure. A run with
+          failures ends with exit code 1 (was always 0).
+        - A tag whose category is missing is a skip, counted apart from tags
+          that failed
+        - -FilePath accepts a name or wildcard (also looked up in the backup
+          directory); the newest match wins. A -FilePath that matches
+          nothing stops the script with exit code 1
+        - Without console input (scheduled task, CI, -NonInteractive) every
+          prompt stops with a clear message naming the parameters and exit
+          code 2, instead of an error
+        - Picker: filter by name (a wildcard, or /text for a substring),
+          renumbered, also on the export-file list; 'all' takes what the
+          filter shows, 'reset' clears it, 'list' shows everything; above
+          50 items it asks for a filter instead of printing the whole list;
+          cancel also with exit, quit or q
+
     v0.1.0  2026-11-16  Paul van Dieen
         - Initial version, not yet tested: export/import of tag categories,
           tags and custom attribute names (Definitions) and of tag
@@ -230,7 +274,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '0.1.0'
+$scriptVersion = '0.2.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -343,32 +387,194 @@ trap {
     break
 }
 
+# --- Run results (#2, as VDSPortGroupManager #20) ----------------------------------
+# Every category, tag, attribute, assignment or value that fails is logged as
+# an ERROR (red) and collected, so the summary names them with the reason and the
+# run ends with exit code 1 (0 = no failures, 2 = stopped for lack of console
+# input).
+$script:RunFailures = [System.Collections.Generic.List[object]]::new()
+
+function Get-FailReason {
+    # The vCenter message without PowerShell's wrapper: 'Exception calling
+    # "CreateDVPortgroup" with "1" argument(s): "..."', or PowerCLI's
+    # tab-separated 'timestamp<TAB>cmdlet<TAB>detail'.
+    param($ErrorRecord)
+    $m = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { "$($ErrorRecord.Exception.Message)" } else { "$ErrorRecord" }
+    if ($m -match "`t") { $m = @($m -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+    if ($m -match '^Exception calling "[^"]+" with "\d+" argument\(s\): "(.*)"$') { $m = $Matches[1] }
+    return $m.Trim()
+}
+
+function Add-RunFailure {
+    param([string]$Action, [string]$Name, [string]$Reason)
+    $script:RunFailures.Add([pscustomobject]@{ Action = $Action; Name = $Name; Reason = $Reason })
+    Write-Log "FAILED $($Action.ToLower()) '$Name': $Reason" -Level ERROR
+}
+
+function Write-RunSummary {
+    # One summary line, coloured by outcome, then the failures of these actions.
+    param([string]$Line, [int]$Failed, [int]$Skipped = 0, [string[]]$Actions = @())
+    $level = if ($Failed -gt 0) { 'ERROR' } elseif ($Skipped -gt 0) { 'WARNING' } else { 'SUCCESS' }
+    Write-Log $Line -Level $level
+    $mine = @($script:RunFailures | Where-Object { $Actions -contains $_.Action })
+    if ($mine.Count -gt 0) {
+        Write-Log "  Failed ($($mine.Count)):" -Level ERROR
+        foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
+    }
+}
+
 # --- Menu Functions -------------------------------------------------------------
+# Long lists: above $PickerListMax items the picker shows a count and a few
+# examples and asks for a filter first; above $PickerEchoMax selected items
+# the confirmation shows the count plus the first and last few (#4).
+$PickerListMax = 50
+$PickerEchoMax = 20
+
+# Words that abort a picker or prompt (#13); -in is case-insensitive.
+$CancelWords = @('cancel', 'exit', 'quit', 'q')
+function Test-CancelInput {
+    param([string]$Text)
+    return ($Text -in $CancelWords)
+}
+
+# Every prompt goes through Read-Input (#11): without console input (a
+# scheduled task, CI, pwsh -NonInteractive, redirected stdin) Read-Host
+# throws or returns $null; stop with a clear message instead of a
+# null-valued-expression error.
+function Stop-NoConsoleInput {
+    param([string]$Prompt)
+    Write-Host "`n  [ERROR] No console input available (unattended run?). The script asked: $($Prompt.Trim())" -ForegroundColor Red
+    Write-Host '  Pass the choices as parameters instead: -Mode and -Content, plus -BackupDirectory' -ForegroundColor Yellow
+    Write-Host '  (Export) or -FilePath and -Force (Import). Save the credential first with one' -ForegroundColor Yellow
+    Write-Host '  interactive run.' -ForegroundColor Yellow
+    $conn = Get-Variable -Name viConn -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($conn) { Disconnect-VIServer -Server $conn -Confirm:$false -ErrorAction SilentlyContinue }
+    exit 2
+}
+
+function Read-Input {
+    param([string]$Prompt, [switch]$AsSecureString)
+    try {
+        $value = if ($AsSecureString) { Read-Host $Prompt -AsSecureString } else { Read-Host $Prompt }
+    }
+    catch {
+        $value = $null
+    }
+    if ($null -eq $value) { Stop-NoConsoleInput -Prompt $Prompt }
+    if ($AsSecureString) { return $value }
+    return $value.Trim()
+}
+
+function Write-ItemList {
+    param([array]$Items, [string]$DisplayProperty, [switch]$Full)
+    $width = "$($Items.Count)".Length
+    $fmt   = '  [{0,' + $width + '}]  {1}'
+    if ($Full -or $Items.Count -le $PickerListMax) {
+        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+        return
+    }
+    for ($i = 0; $i -lt 5; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host ('  ' + (' ' * ($width + 2)) + "  ... $($Items.Count - 10) more ...") -ForegroundColor DarkGray
+    for ($i = $Items.Count - 5; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host "`n  $($Items.Count) items: too many to list. Narrow the list with a filter, or type 'list' to show them all." -ForegroundColor Yellow
+}
+
+function Write-SelectionSummary {
+    param([array]$Selected, [string]$DisplayProperty)
+    Write-Host "`n  Selected $($Selected.Count) item(s):" -ForegroundColor Green
+    if ($Selected.Count -le $PickerEchoMax) {
+        $Selected | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    else {
+        $Selected[0..4] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+        Write-Host "    ... $($Selected.Count - 10) more ..." -ForegroundColor DarkGray
+        $Selected[($Selected.Count - 5)..($Selected.Count - 1)] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    Write-Host ''
+}
+
+function Select-ItemsByName {
+    # Non-interactive selection by name: every item
+    # whose name matches one of the patterns (names or wildcards, -like).
+    param(
+        [Parameter(Mandatory = $true)][array]$Items,
+        [Parameter(Mandatory = $true)][string]$NameProperty,
+        [Parameter(Mandatory = $true)][string]$DisplayProperty,
+        [Parameter(Mandatory = $true)][string[]]$Patterns,
+        [string]$What = 'item'
+    )
+    $selected = [System.Collections.Generic.List[object]]::new()
+    foreach ($pattern in $Patterns) {
+        $hits = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+        if ($hits.Count -eq 0) {
+            Write-Log "No $What matches '$pattern'." -Level WARNING
+        }
+        foreach ($hit in $hits) { if (-not $selected.Contains($hit)) { $selected.Add($hit) } }
+    }
+    if ($selected.Count -gt 0) {
+        Write-Log "Selected $($selected.Count) $What(s) by name: $($Patterns -join ', ')"
+        Write-SelectionSummary -Selected @($selected) -DisplayProperty $DisplayProperty
+    }
+    return @($selected)
+}
+
 function Select-MultipleItems {
     param(
         [Parameter(Mandatory = $true)][array]$Items,
         [Parameter(Mandatory = $true)][string]$DisplayProperty,
-        [Parameter(Mandatory = $true)][string]$Title
+        [Parameter(Mandatory = $true)][string]$Title,
+        # Property the filter matches on (defaults to the display text)
+        [string]$NameProperty = ''
     )
     if ($Items.Count -eq 0) {
         Write-Host '  No items available to select.' -ForegroundColor Yellow
         return @()
     }
+    if (-not $NameProperty) { $NameProperty = $DisplayProperty }
+    $view   = $Items
+    $filter = ''
     Write-Host "`n  $Title" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Items.Count; $i++) {
-        Write-Host ('  [{0,3}]  {1}' -f ($i + 1), $Items[$i].$DisplayProperty)
-    }
+    Write-ItemList -Items $view -DisplayProperty $DisplayProperty
     Write-Host "`n  Enter numbers (e.g. 1,3,5), a range (e.g. 2-6), a combination (e.g. 1,3-5,8)," -ForegroundColor Gray
-    Write-Host "  'all' to select everything, or 'cancel' to abort.`n" -ForegroundColor Gray
+    Write-Host "  'all' to select every item shown, or 'cancel' (or exit, quit, q) to abort." -ForegroundColor Gray
+    Write-Host "  Filter by name: a wildcard (e.g. *2026*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
+    Write-Host "  the filter, 'list' shows every item in the current list.`n" -ForegroundColor Gray
     while ($true) {
-        $userInput = (Read-Host '  Your selection').Trim()
-        if ($userInput -eq 'cancel') {
+        $prompt    = if ($filter) { "  Your selection (filter: $filter, $($view.Count) shown)" } else { '  Your selection' }
+        $userInput = Read-Input $prompt
+        if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return @()
         }
+        if ($userInput -eq 'list') {
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full
+            continue
+        }
+        if ($userInput -eq 'reset' -or ($userInput -eq '' -and $filter)) {
+            $view = $Items; $filter = ''
+            Write-Host "`n  Filter cleared: $($view.Count) item(s)." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -match '[*?]' -or $userInput.StartsWith('/')) {
+            $pattern = if ($userInput.StartsWith('/')) { '*' + [WildcardPattern]::Escape($userInput.Substring(1)) + '*' } else { $userInput }
+            $hits    = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+            if ($hits.Count -eq 0) {
+                Write-Host "  Nothing matches '$userInput'; the list is unchanged." -ForegroundColor Yellow
+                continue
+            }
+            $view = $hits; $filter = $userInput
+            Write-Host "`n  Filter '$filter': $($view.Count) of $($Items.Count) item(s), renumbered." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -eq '') { continue }
         if ($userInput -eq 'all') {
-            Write-Host "  Selected all $($Items.Count) item(s)." -ForegroundColor Green
-            return $Items
+            if ($view.Count -gt $PickerListMax -and -not $filter) {
+                Write-Host "  'all' selects all $($view.Count) item(s)." -ForegroundColor Yellow
+            }
+            Write-SelectionSummary -Selected $view -DisplayProperty $DisplayProperty
+            return $view
         }
         $selectedIndices = @()
         $parts           = $userInput -split ','
@@ -389,56 +595,87 @@ function Select-MultipleItems {
                 $selectedIndices += $start..$end
             }
             else {
-                Write-Host "  Unrecognised input: '$part'. Use numbers, ranges like 2-5, or 'all'." -ForegroundColor Red
+                Write-Host "  Unrecognised input: '$part'. Use numbers, ranges like 2-5, 'all', or a filter (*text* or /text)." -ForegroundColor Red
                 $parseError = $true
                 break
             }
         }
         if ($parseError) { continue }
         $selectedIndices = $selectedIndices | Sort-Object -Unique
-        $invalid         = $selectedIndices | Where-Object { $_ -lt 1 -or $_ -gt $Items.Count }
+        $invalid         = $selectedIndices | Where-Object { $_ -lt 1 -or $_ -gt $view.Count }
         if ($invalid) {
-            Write-Host "  Out-of-range: $($invalid -join ', '). Valid range is 1-$($Items.Count)." -ForegroundColor Red
+            Write-Host "  Out-of-range: $($invalid -join ', '). Valid range is 1-$($view.Count)." -ForegroundColor Red
             continue
         }
-        $selected = @($selectedIndices | ForEach-Object { $Items[$_ - 1] })
-        Write-Host "`n  Selected $($selected.Count) item(s):" -ForegroundColor Green
-        $selected | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
-        Write-Host ''
+        $selected = @($selectedIndices | ForEach-Object { $view[$_ - 1] })
+        Write-SelectionSummary -Selected $selected -DisplayProperty $DisplayProperty
         return $selected
     }
 }
 
 function Select-SingleItem {
+    # One item. With -Filter the list can be narrowed like the multi picker
+    # (wildcard or /text, 'reset', 'list'); used for the export file list,
+    # which grows with every export (#2).
     param(
         [Parameter(Mandatory = $true)][array]$Items,
         [Parameter(Mandatory = $true)][string]$DisplayProperty,
-        [Parameter(Mandatory = $true)][string]$Title
+        [Parameter(Mandatory = $true)][string]$Title,
+        [switch]$Filter
     )
     if ($Items.Count -eq 0) {
         Write-Host '  No items available to select.' -ForegroundColor Yellow
         return $null
     }
+    $view = $Items
+    $flt  = ''
     Write-Host "`n  $Title" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Items.Count; $i++) {
-        Write-Host ('  [{0,3}]  {1}' -f ($i + 1), $Items[$i].$DisplayProperty)
+    if ($Filter) { Write-ItemList -Items $view -DisplayProperty $DisplayProperty }
+    else { Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full }
+    Write-Host "`n  Enter a number to select one item, or 'cancel' (or exit, quit, q) to abort." -ForegroundColor Gray
+    if ($Filter) {
+        Write-Host "  Filter by name: a wildcard (e.g. *2026*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
+        Write-Host "  the filter, 'list' shows every item in the current list." -ForegroundColor Gray
     }
-    Write-Host "`n  Enter a number to select one item, or 'cancel' to abort.`n" -ForegroundColor Gray
+    Write-Host ''
     while ($true) {
-        $userInput = (Read-Host '  Your selection').Trim()
-        if ($userInput -eq 'cancel') {
+        $prompt    = if ($flt) { "  Your selection (filter: $flt, $($view.Count) shown)" } else { '  Your selection' }
+        $userInput = Read-Input $prompt
+        if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return $null
         }
+        if ($Filter -and $userInput -eq 'list') {
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full
+            continue
+        }
+        if ($Filter -and ($userInput -eq 'reset' -or ($userInput -eq '' -and $flt))) {
+            $view = $Items; $flt = ''
+            Write-Host "`n  Filter cleared: $($view.Count) item(s)." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($Filter -and ($userInput -match '[*?]' -or $userInput.StartsWith('/'))) {
+            $pattern = if ($userInput.StartsWith('/')) { '*' + [WildcardPattern]::Escape($userInput.Substring(1)) + '*' } else { $userInput }
+            $hits    = @($Items | Where-Object { $_.$DisplayProperty -like $pattern })
+            if ($hits.Count -eq 0) {
+                Write-Host "  Nothing matches '$userInput'; the list is unchanged." -ForegroundColor Yellow
+                continue
+            }
+            $view = $hits; $flt = $userInput
+            Write-Host "`n  Filter '$flt': $($view.Count) of $($Items.Count) item(s), renumbered." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
         if ($userInput -match '^\d+$') {
             $index = [int]$userInput
-            if ($index -ge 1 -and $index -le $Items.Count) {
-                $selected = $Items[$index - 1]
+            if ($index -ge 1 -and $index -le $view.Count) {
+                $selected = $view[$index - 1]
                 Write-Host "`n  Selected: $($selected.$DisplayProperty)`n" -ForegroundColor Green
                 return $selected
             }
         }
-        Write-Host "  Invalid selection. Enter a number between 1 and $($Items.Count)." -ForegroundColor Red
+        Write-Host "  Invalid selection. Enter a number between 1 and $($view.Count)." -ForegroundColor Red
     }
 }
 
@@ -465,6 +702,99 @@ if (-not $Mode) {
         exit 0
     }
     $Mode = $modeChoice.Value
+}
+
+# --- Backup Directory (#2, as VDSPortGroupManager #18) -----------------------------
+# Interactive runs ask where the exports are (Import) or go (Export): Enter
+# keeps the default, B opens the Windows folder browser, or type a path. No
+# prompt when -BackupDirectory is given, or when the run is unattended
+# (-Content for Export, -FilePath or -Force for Import).
+function Test-FolderDialogAvailable {
+    if (-not $IsWindows) { return $false }
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { return $false }
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop; return $true }
+    catch { return $false }
+}
+
+function Select-FolderDialog {
+    param([string]$Description, [string]$StartPath)
+    $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
+    $dialog.Description = $Description
+    $dialog.UseDescriptionForTitle = $true
+    $dialog.ShowNewFolderButton = $true
+    if ($StartPath -and (Test-Path -Path $StartPath -PathType Container)) { $dialog.SelectedPath = (Resolve-Path $StartPath).Path }
+    # A hidden top-most owner keeps the dialog in front of the console window.
+    $owner = [System.Windows.Forms.Form]::new()
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.WindowState = 'Minimized'
+    try {
+        if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.SelectedPath }
+        return $null
+    }
+    finally {
+        $dialog.Dispose()
+        $owner.Dispose()
+    }
+}
+
+function Get-BackupCount {
+    param([string]$Path)
+    return @(Get-ChildItem -Path $Path -Filter 'Tags_*.json' -File -ErrorAction SilentlyContinue).Count
+}
+
+$askBackupDir = -not $PSBoundParameters.ContainsKey('BackupDirectory') -and (
+    ($Mode -eq 'Export' -and $Content.Count -eq 0) -or
+    ($Mode -eq 'Import' -and -not $FilePath -and -not $Force))
+
+if ($askBackupDir) {
+    $canBrowse = Test-FolderDialogAvailable
+    $purpose   = if ($Mode -eq 'Import') { 'to import from' } else { 'to export to' }
+    while ($true) {
+        Write-Host "`n  Backup directory ${purpose}:" -ForegroundColor Cyan
+        Write-Host "    $BackupDirectory"
+        if ($Mode -eq 'Import' -and (Test-Path -Path $BackupDirectory -PathType Container)) {
+            Write-Host "    ($(Get-BackupCount $BackupDirectory) export(s) here)" -ForegroundColor DarkGray
+        }
+        $hint = if ($canBrowse) { "  [Enter] use it, [B] browse, or type a path ('q' to quit)" } else { "  [Enter] use it, or type a path ('q' to quit)" }
+        $answer = Read-Input $hint
+        if (Test-CancelInput $answer) {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            exit 0
+        }
+
+        $candidate = $BackupDirectory
+        if ($canBrowse -and $answer -match '^[Bb]$') {
+            $desc = if ($Mode -eq 'Import') { 'Select the folder with the tag exports (Tags_*.json)' } else { 'Select the folder for the tag exports' }
+            $picked = Select-FolderDialog -Description $desc -StartPath $BackupDirectory
+            if (-not $picked) { Write-Host '  No folder chosen.' -ForegroundColor Yellow; continue }
+            $candidate = $picked
+        }
+        elseif ($answer) {
+            $candidate = $answer.Trim('"', "'")
+        }
+
+        if ($Mode -eq 'Import') {
+            if (-not (Test-Path -Path $candidate -PathType Container)) {
+                Write-Host "  Folder not found: $candidate" -ForegroundColor Red
+                continue
+            }
+            $count = Get-BackupCount $candidate
+            if ($count -eq 0) {
+                Write-Host "  No tag exports (Tags_*.json) in $candidate. Choose another folder." -ForegroundColor Red
+                $BackupDirectory = $candidate
+                continue
+            }
+            Write-Host "  [OK]   $count export(s) in $candidate." -ForegroundColor Green
+        }
+        elseif (Test-Path -Path $candidate -PathType Leaf) {
+            Write-Host "  That is a file, not a folder: $candidate" -ForegroundColor Red
+            continue
+        }
+        $BackupDirectory = $candidate
+        break
+    }
 }
 
 if ($Mode -ne 'Import' -and ($DryRun -or $OverwriteValues -or $FilePath -or $Force)) {
@@ -527,8 +857,8 @@ if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
     } else {
         Write-Host '  [INFO] No saved credentials found - prompting.' -ForegroundColor Cyan
     }
-    $credUser   = Read-Host "  Username for $vCenterServer"
-    $credPass   = Read-Host '  Password' -AsSecureString
+    $credUser   = Read-Input "  Username for $vCenterServer"
+    $credPass   = Read-Input '  Password' -AsSecureString
     $credential = [System.Management.Automation.PSCredential]::new($credUser, $credPass)
     $credential | Export-Clixml -Path $CredentialPath
     Write-Host "  [OK]   Credentials saved to $CredentialPath." -ForegroundColor Green
@@ -796,7 +1126,7 @@ if ($Mode -eq 'Export') {
             }
         }
         catch {
-            Write-Log "Export failed: $(Get-ErrorDetail $_)" -Level ERROR
+            Add-RunFailure -Action 'Export' -Name ($parts -join ' and ') -Reason (Get-FailReason $_)
             $ok = $false
         }
 
@@ -806,6 +1136,9 @@ if ($Mode -eq 'Export') {
             ConvertTo-Json -InputObject ([pscustomobject]$export) -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
             Write-Log "Exported: $jsonPath" -Level SUCCESS
         }
+        $exportFail = if ($ok) { 0 } else { 1 }
+        $exportLine = if ($ok) { "Export complete: $($parts -join ' and ') written." } else { 'Export failed: nothing written.' }
+        Write-RunSummary -Line $exportLine -Failed $exportFail -Actions 'Export'
     }
 }
 
@@ -830,10 +1163,21 @@ if ($Mode -eq 'Import') {
     }
     $fileChoice = $null
     if ($FilePath) {
-        if (Test-Path -Path $FilePath -PathType Leaf) {
-            $fileChoice = Get-Item -Path $FilePath
-        } else {
+        # A path or a name, wildcards allowed; a bare name is looked up in the
+        # backup directory too. The newest match wins (#2).
+        $hits = @(Get-ChildItem -Path $FilePath -File -ErrorAction SilentlyContinue)
+        if ($hits.Count -eq 0 -and -not (Split-Path -Path $FilePath -Parent)) {
+            $hits = @(Get-ChildItem -Path (Join-Path $BackupDirectory $FilePath) -File -ErrorAction SilentlyContinue)
+        }
+        $hits = @($hits | Sort-Object LastWriteTime -Descending)
+        if ($hits.Count -eq 0) {
             Write-Log "-FilePath not found: $FilePath" -Level ERROR
+            Disconnect-VIServer -Server $viConn -Confirm:$false
+            exit 1
+        }
+        $fileChoice = $hits[0]
+        if ($hits.Count -gt 1) {
+            Write-Log "-FilePath '$FilePath' matches $($hits.Count) files; using the newest: $($fileChoice.Name)" -Level WARNING
         }
     }
     elseif ($allJson.Count -eq 0) {
@@ -843,7 +1187,7 @@ if ($Mode -eq 'Import') {
         $fileItems = @(for ($i = 0; $i -lt $allJson.Count; $i++) {
             [pscustomobject]@{ Label = "$($allJson[$i].Name)$(if ($i -eq 0) { '  [newest]' })"; File = $allJson[$i] }
         })
-        $picked = Select-SingleItem -Items $fileItems -DisplayProperty 'Label' -Title 'Select export to IMPORT'
+        $picked = Select-SingleItem -Items $fileItems -DisplayProperty 'Label' -Title 'Select export to IMPORT' -Filter
         if ($picked) { $fileChoice = $picked.File }
     }
 
@@ -852,11 +1196,11 @@ if ($Mode -eq 'Import') {
         try {
             $data = Get-Content -Path $fileChoice.FullName -Raw | ConvertFrom-Json
             if (-not ($data.PSObject.Properties.Name -contains 'Tool') -or $data.Tool -ne 'VITagManager') {
-                Write-Log "'$($fileChoice.Name)' is not a VITagManager export." -Level ERROR
+                Add-RunFailure -Action 'Read' -Name $fileChoice.Name -Reason 'not a VITagManager export'
                 $data = $null
             }
         } catch {
-            Write-Log "Could not read '$($fileChoice.Name)': $($_.Exception.Message)" -Level ERROR
+            Add-RunFailure -Action 'Read' -Name $fileChoice.Name -Reason $_.Exception.Message
             $data = $null
         }
     }
@@ -881,7 +1225,7 @@ if ($Mode -eq 'Import') {
             Write-Log "Content: $($parts -join ', '); overwrite differing values: $([bool]$OverwriteValues); dry run: $([bool]$DryRun)"
             $proceed = $true
             if (-not $DryRun -and -not $Force) {
-                $answer = (Read-Host "  Proceed with changes on ${vCenterServer}? (y/N)").Trim()
+                $answer = Read-Input "  Proceed with changes on ${vCenterServer}? (y/N)"
                 if ($answer -notmatch '^[Yy]') {
                     Write-Log 'Import cancelled by user.' -Level WARNING
                     $proceed = $false
@@ -911,7 +1255,7 @@ if ($Mode -eq 'Import') {
                 # ---------------------------------------------------------------
                 if ($parts -contains 'Definitions') {
                     Write-Log '--- Definitions ---'
-                    $s = @{ CatNew = 0; CatOld = 0; CatDiff = 0; CatFail = 0; TagNew = 0; TagOld = 0; TagFail = 0; AttrNew = 0; AttrOld = 0; AttrFail = 0 }
+                    $s = @{ CatNew = 0; CatOld = 0; CatDiff = 0; CatFail = 0; TagNew = 0; TagOld = 0; TagSkip = 0; TagFail = 0; AttrNew = 0; AttrOld = 0; AttrDiff = 0; AttrFail = 0 }
 
                     foreach ($c in @($data.Definitions.TagCategories | Where-Object { $null -ne $_ -and (Test-InCategory $_.Name) })) {
                         # 'All' (no restriction) is the default of New-TagCategory
@@ -940,7 +1284,7 @@ if ($Mode -eq 'Import') {
                             Write-Log "Created category '$($c.Name)' ($($c.Cardinality), $typeLabel)" -Level SUCCESS
                             $s.CatNew++
                         } catch {
-                            Write-Log "Could not create category '$($c.Name)': $(Get-ErrorDetail $_)" -Level WARNING
+                            Add-RunFailure -Action 'Create category' -Name $c.Name -Reason (Get-FailReason $_)
                             $s.CatFail++
                         }
                     }
@@ -954,7 +1298,7 @@ if ($Mode -eq 'Import') {
                                 $s.TagNew++
                             } else {
                                 Write-Log "Skipped tag '$($t.Category)/$($t.Name)': category not present." -Level WARNING
-                                $s.TagFail++
+                                $s.TagSkip++
                             }
                             continue
                         }
@@ -970,7 +1314,7 @@ if ($Mode -eq 'Import') {
                             Write-Log "Created tag '$($t.Category)/$($t.Name)'" -Level SUCCESS
                             $s.TagNew++
                         } catch {
-                            Write-Log "Could not create tag '$($t.Category)/$($t.Name)': $(Get-ErrorDetail $_)" -Level WARNING
+                            Add-RunFailure -Action 'Create tag' -Name "$($t.Category)/$($t.Name)" -Reason (Get-FailReason $_)
                             $s.TagFail++
                         }
                     }
@@ -981,6 +1325,7 @@ if ($Mode -eq 'Import') {
                         if ($found) {
                             $s.AttrOld++
                             if ([string]$found.ManagedObjectType -ne [string]$a.TargetType) {
+                                $s.AttrDiff++
                                 Write-Log "Custom attribute '$($a.Name)' exists with target type $(Get-FieldTypeLabel $found.ManagedObjectType), export has $(Get-FieldTypeLabel $a.TargetType). Left as is." -Level WARNING
                             }
                             continue
@@ -999,14 +1344,18 @@ if ($Mode -eq 'Import') {
                             Write-Log "Created custom attribute $label" -Level SUCCESS
                             $s.AttrNew++
                         } catch {
-                            Write-Log "Could not create custom attribute $label`: $(Get-ErrorDetail $_)" -Level WARNING
+                            Add-RunFailure -Action 'Create attribute' -Name $label -Reason (Get-FailReason $_)
                             $s.AttrFail++
                         }
                     }
 
-                    Write-Log "Tag categories: $($s.CatNew) ${verb}created, $($s.CatOld) already present ($($s.CatDiff) with different settings), $($s.CatFail) failed."
-                    Write-Log "Tags: $($s.TagNew) ${verb}created, $($s.TagOld) already present, $($s.TagFail) skipped or failed."
-                    Write-Log "Custom attributes: $($s.AttrNew) ${verb}created, $($s.AttrOld) already present, $($s.AttrFail) failed."
+                    # Summaries (#2): red with failures, yellow with only skips, green otherwise
+                    Write-RunSummary -Line "Tag categories: $($s.CatNew) ${verb}created, $($s.CatOld) already present ($($s.CatDiff) with different settings), $($s.CatFail) failed." `
+                        -Failed $s.CatFail -Skipped $s.CatDiff -Actions 'Create category'
+                    Write-RunSummary -Line "Tags: $($s.TagNew) ${verb}created, $($s.TagOld) already present, $($s.TagSkip) skipped (category missing), $($s.TagFail) failed." `
+                        -Failed $s.TagFail -Skipped $s.TagSkip -Actions 'Create tag'
+                    Write-RunSummary -Line "Custom attributes: $($s.AttrNew) ${verb}created, $($s.AttrOld) already present ($($s.AttrDiff) with a different target type), $($s.AttrFail) failed." `
+                        -Failed $s.AttrFail -Skipped $s.AttrDiff -Actions 'Create attribute'
                 }
 
                 # ---------------------------------------------------------------
@@ -1123,7 +1472,7 @@ if ($Mode -eq 'Import') {
                         if ($DryRun -or -not $viObjects.ContainsKey($e.MoRef.Value)) {
                             if (-not $DryRun) {
                                 $s.TagFail++
-                                Write-Log "Could not assign $label`: object could not be loaded." -Level WARNING
+                                Add-RunFailure -Action 'Assign tag' -Name $label -Reason 'object could not be loaded'
                                 continue
                             }
                             Write-Log "[DryRun] Would assign $label"
@@ -1134,7 +1483,7 @@ if ($Mode -eq 'Import') {
                                 Write-Log "Assigned $label" -Level SUCCESS
                                 $s.TagSet++
                             } catch {
-                                Write-Log "Could not assign $label`: $(Get-ErrorDetail $_)" -Level WARNING
+                                Add-RunFailure -Action 'Assign tag' -Name $label -Reason (Get-FailReason $_)
                                 $s.TagFail++
                                 continue
                             }
@@ -1173,14 +1522,19 @@ if ($Mode -eq 'Import') {
                             $e.CustomValue[$key] = [string]$av.Value
                             $s.ValSet++
                         } catch {
-                            Write-Log "Could not set $label`: $(Get-ErrorDetail $_)" -Level WARNING
+                            Add-RunFailure -Action 'Set value' -Name $label -Reason (Get-FailReason $_)
                             $s.ValFail++
                         }
                     }
 
-                    Write-Log "Objects: $($s.NotFound) not found on this vCenter (listed in the log file), $($s.Ambiguous) ambiguous name."
-                    Write-Log "Tag assignments: $($s.TagSet) ${verb}assigned, $($s.TagOld) already present, $($s.TagNoDef) tag missing, $($s.TagConflict) single-cardinality conflict, $($s.TagNoObj) object not found or ambiguous, $($s.TagFail) failed (of $($tagEntries.Count))."
-                    Write-Log "Attribute values: $($s.ValSet) ${verb}set, $($s.ValOld) already equal, $($s.ValDiff) different (left as is), $($s.ValNoDef) attribute missing, $($s.ValNoObj) object not found or ambiguous, $($s.ValFail) failed (of $($valEntries.Count))."
+                    # Objects not found are normal during a migration (not moved yet), so
+                    # they don't colour the line; they are listed in the log file
+                    Write-RunSummary -Line "Objects: $($s.NotFound) not found on this vCenter (listed in the log file), $($s.Ambiguous) ambiguous name." `
+                        -Failed 0 -Skipped $s.Ambiguous
+                    Write-RunSummary -Line "Tag assignments: $($s.TagSet) ${verb}assigned, $($s.TagOld) already present, $($s.TagNoDef) tag missing, $($s.TagConflict) single-cardinality conflict, $($s.TagNoObj) object not found or ambiguous, $($s.TagFail) failed (of $($tagEntries.Count))." `
+                        -Failed $s.TagFail -Skipped ($s.TagNoDef + $s.TagConflict) -Actions 'Assign tag'
+                    Write-RunSummary -Line "Attribute values: $($s.ValSet) ${verb}set, $($s.ValOld) already equal, $($s.ValDiff) different (left as is), $($s.ValNoDef) attribute missing, $($s.ValNoObj) object not found or ambiguous, $($s.ValFail) failed (of $($valEntries.Count))." `
+                        -Failed $s.ValFail -Skipped ($s.ValDiff + $s.ValNoDef) -Actions 'Set value'
                 }
 
                 if ($DryRun) { Write-Log 'Dry run: nothing was changed.' -Level WARNING }
@@ -1194,5 +1548,10 @@ if ($Mode -eq 'Import') {
 # =============================================================================
 Write-Log 'Disconnecting from vCenter...'
 Disconnect-VIServer -Server $viConn -Confirm:$false
+if ($script:RunFailures.Count -gt 0) {
+    Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
+    Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    exit 1
+}
 Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray

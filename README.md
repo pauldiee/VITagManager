@@ -4,10 +4,10 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 0.1.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 0.2.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
-> **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`). It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
+> **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
 
 ---
 
@@ -19,6 +19,25 @@ The script connects to a vCenter and runs one of two modes (`-Mode Export|Import
 |---|---|
 | Definitions | Tag categories (description, cardinality, entity types), tags (description), custom attribute names with their target type (or global) |
 | Assignments | Which object carries which tag, and the custom attribute values per object |
+
+Every picker accepts single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (or `exit`, `quit`, `q`). Every action is logged to the console and a timestamped log file.
+
+**Backup directory.** Without `-BackupDirectory`, an interactive run asks for it right after the mode: **Enter** keeps the default `Backups\` next to the script, **B** opens the Windows folder browser (only where a GUI is available), or type a path. Import shows how many exports (`Tags_*.json`) the folder holds and asks again when it holds none. An unattended run (`-Content` on Export, `-FilePath` or `-Force` on Import) doesn't ask.
+
+**Failures stand out.** A category, tag or custom attribute that can't be created, a tag that can't be assigned, a value that can't be set, a failed export and an unreadable export file are logged in red as `FAILED …`, with vCenter's own message. Each summary line is red when something failed, yellow when something was only skipped (tag or attribute missing on the target, a single-cardinality conflict, a different value or different settings, an ambiguous name), green otherwise, and is followed by the list of failures. Objects that are not on the target yet don't colour the line: during a migration that's normal.
+
+### Filtering a picker
+
+The export-file picker filters by name, which helps once the backup directory holds an export per wave. While a filter is on, the prompt shows it, for example `Your selection (filter: /Assignments, 3 shown)`.
+
+| To | Type |
+|---|---|
+| Narrow the list | A wildcard (`*Assignments*`) or `/text` for a substring |
+| Change the filter | The new filter straight away; it searches the full list again, not within the previous filter |
+| Clear the filter | `reset`, or just Enter |
+| See everything in the current list | `list` |
+
+The list is renumbered after every filter and after clearing it, so pick the number from the list shown just above the prompt. A filter that matches nothing leaves the list as it was.
 
 ### Why two kinds
 
@@ -81,7 +100,20 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host: [Jump Host: PowerShell 
 # One wave: export right before it, import right after it
 .\Invoke-VITagManager.ps1 -vCenterServer vc-old.vcf.lab -Mode Export -Content Assignments -VMListPath .\wave1.txt
 .\Invoke-VITagManager.ps1 -vCenterServer vc-new.vcf.lab -Mode Import -Content Assignments -VMListPath .\wave1.txt -DryRun
+
+# Scripted, after a wave: the newest Assignments export from the backup directory, no prompts
+.\Invoke-VITagManager.ps1 -vCenterServer vc-new.vcf.lab -Mode Import -Content Assignments -FilePath 'Tags_*_Assignments_*.json' -VMListPath .\wave1.txt -Force
 ```
+
+From a scheduled task or another script, start it with `pwsh -Command` rather than `pwsh -File`: with `-File`, `-Content Definitions,Assignments` arrives as one string and is refused.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Finished without failures (skips are allowed) |
+| 1 | Something failed: see the red `FAILED` lines and the summary, or the script could not start (PowerCLI, connection, VM list or `-FilePath` not found) |
+| 2 | Stopped because a prompt needed console input in an unattended run; the message names the parameters to pass. Save the credential first with one interactive run |
 
 ## Parameters
 
@@ -94,10 +126,10 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host: [Jump Host: PowerShell 
 | `-VMListPath` | Text file with one VM name per line (`#` lines ignored); same effect as `-VMName` |
 | `-Category` | Limit categories, tags and tag assignments to these categories (wildcards allowed) |
 | `-IncludeSystemAttributes` | Also handle the system custom attributes listed above |
-| `-BackupDirectory` | Where JSON files are written and read. Default: `Backups\` next to the script |
+| `-BackupDirectory` | Where JSON files are written and read. Default: `Backups\` next to the script. Asked after the mode when omitted (Enter, B for the folder browser, or a path), except in an unattended run |
 | `-LogDirectory` | Default: `Logs\` next to the script |
 | `-OverwriteValues` | Import: replace attribute values that differ on the target |
-| `-FilePath` | Import: the export file to import, instead of the menu |
+| `-FilePath` | Import: the export file to import, instead of the menu. A path or a name, wildcards allowed (a bare name is also looked up in the backup directory); the newest match wins |
 | `-Force` | Import: no confirmation question (scripted runs; try `-DryRun` first) |
 | `-DryRun` | Import: show what would change, change nothing |
 | `-CredentialPath` | Default: `creds\<vCenterServer>.cred` next to the script |

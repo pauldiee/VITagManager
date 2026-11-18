@@ -141,7 +141,7 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 0.2.0
+    Version  : 1.0.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -157,6 +157,26 @@
 
 <#
 CHANGELOG
+    v1.0.0  2026-11-18  Paul van Dieen
+        - Fix (#4): an export of Assignments without a VM filter stopped with
+          "The object 'vim.vslm.host.VStorageObjectManager:...' has already
+          been deleted or has not been completely created" and wrote nothing
+          (field report, vCenter 8.0.3). It read all tag assignments of
+          vCenter in one call, which also resolves tags on objects PowerCLI
+          can't load (here a vStorage object, probably a first-class disk).
+          Tags are now read per object of the supported types, in batches
+          of 200; a batch that fails is read again one object at a time, and
+          an object whose tags can't be read is a FAILED line while the
+          export is still written. Tags on other kinds of objects (content
+          library items, first-class disks) are not read; the log says so.
+        - Read per object, vCenter 9 also returns a cluster's vSphere Zone as
+          a tag association (id ...:zone-<name>:GLOBAL, no name, no
+          category). Export and import now match associations to the real
+          tags by id and leave anything else out (log file only); without
+          that, StrictMode stopped on the missing category (lab, VCF 9.1.1)
+        - Version 1.0.0: the other toolkits started at 1.0.0, VITagManager at
+          0.1.0; the number says nothing more than that
+
     v0.2.0  2026-11-18  Paul van Dieen
         - On par with VDSPortGroupManager 1.6.1 and VIFolderManager 1.3.0 (#2)
         - Pick the backup directory interactively: without -BackupDirectory,
@@ -274,7 +294,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '0.2.0'
+$scriptVersion = '1.0.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1072,15 +1092,50 @@ if ($Mode -eq 'Export') {
                 # Tag assignments
                 $tagAssignments = @()
                 if ($selected.Count -gt 0) {
-                    $assignments = if ($waveActive) {
-                        $vmObjects = @(Get-VIObjectByVIView -Server $viConn -MORef @($selected.Values | ForEach-Object { $_.MoRef }))
-                        @(Get-TagAssignment -Server $viConn -Entity $vmObjects)
-                    } else {
-                        @(Get-TagAssignment -Server $viConn)
+                    # Per object of the supported types, never Get-TagAssignment without
+                    # -Entity (#4): that resolves every tag association in vCenter, also
+                    # those on objects PowerCLI can't load (seen on 8.0.3: 'vim.vslm.host.
+                    # VStorageObjectManager ... has already been deleted'), and one of
+                    # those stopped the whole export. Batches of 200; a batch that fails
+                    # is read again one object at a time, so only that object is lost.
+                    $assignments = [System.Collections.Generic.List[object]]::new()
+                    $refs = @($selected.Values | ForEach-Object { $_.MoRef })
+                    $batchSize = 200
+                    for ($i = 0; $i -lt $refs.Count; $i += $batchSize) {
+                        $batch = @($refs[$i..([Math]::Min($i + $batchSize, $refs.Count) - 1)])
+                        try {
+                            $objs = @(Get-VIObjectByVIView -Server $viConn -MORef $batch)
+                            foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $objs -ErrorAction Stop)) { $assignments.Add($a) }
+                        } catch {
+                            Write-Log "Reading the tags of $($batch.Count) object(s) in one call failed ($(Get-FailReason $_)); reading them one by one." -Level WARNING
+                            foreach ($ref in $batch) {
+                                try {
+                                    $o = Get-VIObjectByVIView -Server $viConn -MORef $ref
+                                    foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $o -ErrorAction Stop)) { $assignments.Add($a) }
+                                } catch {
+                                    $e = $selected[$ref.Value]
+                                    Add-RunFailure -Action 'Read tags' -Name "$($e.Type) '$($e.Name)'" -Reason (Get-FailReason $_)
+                                }
+                            }
+                        }
                     }
+                    if (-not $waveActive) {
+                        Write-Log 'Tags on other kinds of objects (content library items, first-class disks and the like) are not read.'
+                    }
+                    # Match each association to a real tag by its id (#4). Per object,
+                    # vCenter 9 also returns the vSphere Zone of a cluster as an
+                    # association (tag id ...:zone-<name>:GLOBAL) with no name and no
+                    # category; it is not a tag, so it is left out (log file only).
+                    $tagById = @{}
+                    foreach ($t in @(Get-Tag -Server $viConn)) { $tagById["$($t.Id)"] = $t }
                     $skippedTypes = @{}
                     foreach ($a in $assignments) {
-                        if (-not (Test-InCategory $a.Tag.Category.Name)) { continue }
+                        if (-not $tagById.ContainsKey("$($a.Tag.Id)")) {
+                            Write-Log "Left out $($a.Entity.Id): association $($a.Tag.Id) is not a tag (for example a vSphere Zone)." -FileOnly
+                            continue
+                        }
+                        $realTag = $tagById["$($a.Tag.Id)"]
+                        if (-not (Test-InCategory $realTag.Category.Name)) { continue }
                         $id = Split-EntityId "$($a.Entity.Id)"
                         if ($null -eq $id -or -not $selected.ContainsKey($id.Value) -or $selected[$id.Value].Type -ne $id.Type) {
                             $label = if ($id) { $id.Type } else { "$($a.Entity.Id)" }
@@ -1089,8 +1144,8 @@ if ($Mode -eq 'Export') {
                         }
                         $tagAssignments += [pscustomobject]@{
                             Entity   = Get-EntityRecord $selected[$id.Value]
-                            Category = $a.Tag.Category.Name
-                            Tag      = $a.Tag.Name
+                            Category = $realTag.Category.Name
+                            Tag      = $realTag.Name
                         }
                     }
                     if (-not $waveActive) {
@@ -1136,9 +1191,12 @@ if ($Mode -eq 'Export') {
             ConvertTo-Json -InputObject ([pscustomobject]$export) -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
             Write-Log "Exported: $jsonPath" -Level SUCCESS
         }
-        $exportFail = if ($ok) { 0 } else { 1 }
-        $exportLine = if ($ok) { "Export complete: $($parts -join ' and ') written." } else { 'Export failed: nothing written.' }
-        Write-RunSummary -Line $exportLine -Failed $exportFail -Actions 'Export'
+        $readFail   = @($script:RunFailures | Where-Object { $_.Action -eq 'Read tags' }).Count
+        $exportFail = $(if ($ok) { 0 } else { 1 }) + $readFail
+        $exportLine = if (-not $ok) { 'Export failed: nothing written.' }
+                      elseif ($readFail -gt 0) { "Export complete: $($parts -join ' and ') written, without the tags of $readFail object(s) that could not be read." }
+                      else { "Export complete: $($parts -join ' and ') written." }
+        Write-RunSummary -Line $exportLine -Failed $exportFail -Actions 'Export', 'Read tags'
     }
 }
 
@@ -1437,11 +1495,16 @@ if ($Mode -eq 'Import') {
                             $id = Split-EntityId "$($o.Id)"
                             if ($id) { $viObjects[$id.Value] = $o }
                         }
+                        # Real tags only, matched by id (#4): a cluster's vSphere Zone comes
+                        # back as an association without name or category
+                        $tagById = @{}
+                        foreach ($t in $tagByKey.Values) { $tagById["$($t.Id)"] = $t }
                         foreach ($a in @(Get-TagAssignment -Server $viConn -Entity @($viObjects.Values))) {
                             $id = Split-EntityId "$($a.Entity.Id)"
                             if (-not $id) { continue }
+                            if (-not $tagById.ContainsKey("$($a.Tag.Id)")) { continue }
                             if (-not $currentTags.ContainsKey($id.Value)) { $currentTags[$id.Value] = New-Object System.Collections.Generic.List[object] }
-                            $currentTags[$id.Value].Add($a.Tag)
+                            $currentTags[$id.Value].Add($tagById["$($a.Tag.Id)"])
                         }
                     }
 

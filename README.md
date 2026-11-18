@@ -4,7 +4,7 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 1.1.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.2.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
 > **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) and the 1.0.0 fix on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
@@ -62,7 +62,9 @@ Writes `Tags_<vcenter>_<Definitions|Assignments|All>_<timestamp>.json` to the ba
 
 Assignments cover VMs and templates, hosts, clusters, standalone hosts, datacenters, datastores, datastore clusters, folders, resource pools, vApps, distributed switches, distributed port groups and standard networks. Tags on other kinds of objects (for example content library items or first-class disks) are not read. With `-VMName` or `-VMListPath` only those VMs are exported.
 
-Tags are read per object, 200 objects per call. Reading all tag assignments of a vCenter in one call (`Get-TagAssignment` without `-Entity`) stops on the first tag on an object PowerCLI can't load: on a vCenter 8.0.3 that ended a whole export with *"The object 'vim.vslm.host.VStorageObjectManager:vstorageObjectManager' has already been deleted or has not been completely created"* (field report, #4). If a call of 200 objects fails anyway, they are read again one at a time; an object whose tags can't be read is a red `FAILED read tags` line, and the export is still written without that object's tags.
+**How tags are read (1.2.0).** Through vCenter's own tagging API (`com.vmware.cis.tagging.tag_association`): for 100 tags at a time it returns every object id they are attached to, so a few calls cover the whole vCenter. The script connects to it with the same credential (`Connect-CisServer`, HTTPS to vCenter, nothing extra to open). Nothing is turned into a PowerCLI object on the way, so an object that is gone or can't be loaded can't stop the export. On a field export of 2820 objects (12770 tag assignments) the per-object way took about 20 minutes (#9). Import reads the current tags of the objects involved the same way, 500 objects per call.
+
+**Fallback.** If the tagging API is not available, the log says so in yellow and the tags are read per object as in 1.0.0 and 1.1.0, 200 objects per call. Reading all tag assignments of a vCenter with `Get-TagAssignment` without `-Entity` is never used: it stops on the first tag on an object PowerCLI can't load (field report on vCenter 8.0.3: *"The object 'vim.vslm.host.VStorageObjectManager:vstorageObjectManager' has already been deleted or has not been completely created"*, #4). If a call of 200 objects fails, they are read one at a time. An object that disappeared in the meantime (seen: a Kubernetes control-plane VM that the Supervisor replaced) is a yellow skip; any other object whose tags can't be read is a red `FAILED read tags` line. The export is written either way.
 
 For VMs the export also records the instance UUID and BIOS UUID; they are only used on import to tell apart VMs with the same name.
 

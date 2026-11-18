@@ -36,7 +36,7 @@
     All activity is written to both the console and a timestamped log file.
     Use -DryRun to see what Import would change without changing anything.
 
-    Credentials are saved as creds\<hostname>.cred next to the script using
+    Credentials are saved as <hostname>.cred next to the script using
     Export-Clixml (DPAPI-protected on Windows, tied to the current user; NOT
     encrypted on Linux/macOS).
 
@@ -106,7 +106,7 @@
     changing anything.
 
 .PARAMETER CredentialPath
-    Path to the saved credential file. Defaults to creds\<vCenterServer>.cred
+    Path to the saved credential file. Defaults to <vCenterServer>.cred
     next to the script.
 
 .PARAMETER ResetCredentials
@@ -164,6 +164,11 @@ CHANGELOG
           import per category, tag, attribute, tag assignment and attribute
           value. Updated at most every 250 ms; the bar disappears when the
           step ends. The log file is unchanged
+        - The saved credential is <vCenterServer>.cred next to the script,
+          as in the other toolkits (#8); up to 1.0.0 it was
+          creds\<vCenterServer>.cred. No transition: a file in creds\ is no
+          longer used, so the first run asks for the credential once (or
+          pass -CredentialPath). Same in tests\New-VITagTestSet.ps1
 
     v1.0.0  2026-11-18  Paul van Dieen
         - Fix (#4): an export of Assignments without a VM filter stopped with
@@ -918,7 +923,8 @@ function Test-SystemAttribute {
 
 # --- Credential Management ------------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
-if (-not $CredentialPath) { $CredentialPath = Join-Path (Join-Path $scriptDir 'creds') "$safeVc.cred" }
+# Next to the script, as in the other toolkits (#8; up to 1.0.0 it was creds\)
+if (-not $CredentialPath) { $CredentialPath = Join-Path $scriptDir "$safeVc.cred" }
 $credDir = Split-Path -Parent $CredentialPath
 if ($credDir -and -not (Test-Path $credDir)) { New-Item -ItemType Directory -Path $credDir -Force | Out-Null }
 

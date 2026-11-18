@@ -13,7 +13,7 @@ the **Result** column is filled in per run (date, lab, pass/fail, log file).
 | This test plan | `VITagManager\tests\TESTPLAN.md` |
 | Test set script | `VITagManager\tests\New-VITagTestSet.ps1`, see [Test set](#test-set) |
 | Export files and logs of a run | `VITagManager\Backups\` and `VITagManager\Logs\` (git-ignored) |
-| Credentials | `VITagManager\creds\<host>.cred` (git-ignored, DPAPI) |
+| Credentials | `VITagManager\<host>.cred` (git-ignored, DPAPI); up to 1.0.0 `VITagManager\creds\<host>.cred` |
 | Lab addresses, versions, test sets left behind | `pauls-hub\notes\labs.md` (add a `VITM-T` note per lab once a set is created) |
 | What is waiting on Paul | `pauls-hub\notes\open-werk.md` |
 | Lab findings after a run | README section "Lab findings" + VITagManager memory |

@@ -134,7 +134,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-FilePath` | Import: the export file to import, instead of the menu. A path or a name, wildcards allowed (a bare name is also looked up in the backup directory); the newest match wins |
 | `-Force` | Import: no confirmation question (scripted runs; try `-DryRun` first) |
 | `-DryRun` | Import: show what would change, change nothing |
-| `-CredentialPath` | Default: `creds\<vCenterServer>.cred` next to the script |
+| `-CredentialPath` | Default: `<vCenterServer>.cred` next to the script |
 | `-ResetCredentials` | Prompt for new credentials |
 | `-SkipCertificateValidation` | Accept self-signed certificates (lab use) |
 
@@ -144,7 +144,9 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 
 ## Credentials
 
-Saved with `Export-Clixml` as `creds\<vCenterServer>.cred` next to the script. On Windows the password is DPAPI-encrypted for the current user; on Linux and macOS it is **not** encrypted. `*.cred` files and `creds/` are git-ignored.
+Saved with `Export-Clixml` as `<vCenterServer>.cred` next to the script, as in the other toolkits. On Windows the password is DPAPI-encrypted for the current user; on Linux and macOS it is **not** encrypted. `*.cred` files and `creds/` are git-ignored.
+
+Up to 1.0.0 the file was `creds\<vCenterServer>.cred`. 1.1.0 no longer looks there: the first run asks for the credential once and saves it next to the script. Delete the old `creds\` folder afterwards, or pass `-CredentialPath` to keep using a file there.
 
 ## Credits
 

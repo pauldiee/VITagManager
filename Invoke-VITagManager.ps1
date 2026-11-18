@@ -141,7 +141,7 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.1.0
+    Version  : 1.2.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -157,6 +157,25 @@
 
 <#
 CHANGELOG
+    v1.2.0  2026-11-18  Paul van Dieen
+        - Tag assignments are read through vCenter's tagging API
+          (com.vmware.cis.tagging.tag_association, #9): every object id of
+          100 tags per call on export, the current tags of 500 objects per
+          call on import, with the same credential (Connect-CisServer). A
+          field export of 2820 objects took about 20 minutes the per-object
+          way. Nothing is resolved to a PowerCLI object, so a vanished or
+          unloadable object can't stop the export. Without the tagging API
+          the script falls back to the per-object way of 1.0.0, with a
+          yellow line in the log
+        - Per-object fallback: an object that disappears during the export
+          (has already been deleted / ManagedObjectNotFound; seen: a
+          Kubernetes control-plane VM replaced by the Supervisor) is a
+          yellow skip, not a failure, and doesn't set exit code 1
+        - Tag assignments and attribute values are collected in a list, not
+          an array that grows by copying (thousands of rows)
+        - Lab: exports through the API identical to 1.1.0 on vCenter 9.1.1
+          and 8.0.3; the assignments step on 9.1.1 from about 26 to 4 s
+
     v1.1.0  2026-11-18  Paul van Dieen
         - Progress bar during long steps (#6): "n of N: item", the
           percentage and the time left, in the export while it reads the
@@ -307,7 +326,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.1.0'
+$scriptVersion = '1.2.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -965,6 +984,24 @@ try {
     exit 1
 }
 
+# --- Tagging API (#9) -----------------------------------------------------------
+# Tag assignments are read in bulk through vCenter's tagging API
+# (com.vmware.cis.tagging.tag_association), with the same credential: a few
+# calls instead of one per object (a 2820-object export took 20 minutes the
+# per-object way). Without it the script reads per object, as before.
+$cisConn  = $null
+$tagAssoc = $null
+if ($Mode -eq 'Export' -or $Mode -eq 'Import') {
+    try {
+        $cisConn  = Connect-CisServer -Server $vCenterServer -Credential $credential -ErrorAction Stop -WarningAction SilentlyContinue
+        $tagAssoc = Get-CisService -Server $cisConn -Name 'com.vmware.cis.tagging.tag_association' -ErrorAction Stop
+        Write-Log 'Tagging API connected: tag assignments are read in bulk.'
+    } catch {
+        Write-Log "Tagging API not available ($(Get-FailReason $_)); tag assignments are read per object instead (slower)." -Level WARNING
+        $tagAssoc = $null
+    }
+}
+
 # --- vCenter Helper Functions ---------------------------------------------------
 $serviceInstance = Get-View -Server $viConn ServiceInstance
 $fieldManager    = Get-View -Server $viConn -Id $serviceInstance.Content.CustomFieldsManager
@@ -1151,32 +1188,69 @@ if ($Mode -eq 'Export') {
                 }
 
                 # Tag assignments
-                $tagAssignments = @()
+                $tagAssignments = [System.Collections.Generic.List[object]]::new()
+                $readGone = 0
                 if ($selected.Count -gt 0) {
-                    # Per object of the supported types, never Get-TagAssignment without
-                    # -Entity (#4): that resolves every tag association in vCenter, also
-                    # those on objects PowerCLI can't load (seen on 8.0.3: 'vim.vslm.host.
-                    # VStorageObjectManager ... has already been deleted'), and one of
-                    # those stopped the whole export. Batches of 200; a batch that fails
-                    # is read again one object at a time, so only that object is lost.
-                    $assignments = [System.Collections.Generic.List[object]]::new()
-                    $refs = @($selected.Values | ForEach-Object { $_.MoRef })
-                    $batchSize = 200
-                    for ($i = 0; $i -lt $refs.Count; $i += $batchSize) {
-                        Show-Progress -Activity 'Reading tag assignments' -Index ($i + 1) -Total $refs.Count -Item "objects $($i + 1) to $([Math]::Min($i + $batchSize, $refs.Count))"
-                        $batch = @($refs[$i..([Math]::Min($i + $batchSize, $refs.Count) - 1)])
+                    # Only real tags count, matched by id (#4): per object, vCenter 9 also
+                    # returns the vSphere Zone of a cluster as an association (tag id
+                    # ...:zone-<name>:GLOBAL) without name or category.
+                    $tagById = @{}
+                    foreach ($t in @(Get-Tag -Server $viConn)) { $tagById["$($t.Id)"] = $t }
+                    # Each association as TagId + EntityId ('VirtualMachine-vm-42')
+                    $assoc = [System.Collections.Generic.List[object]]::new()
+                    $viaApi = $false
+                    if ($tagAssoc) {
+                        # vCenter's tagging API (#9): for a list of tags, every attached
+                        # object id in one call. Nothing is resolved to a PowerCLI object,
+                        # so an object that is gone or can't be loaded can't stop the
+                        # export. 100 tags per call.
                         try {
-                            $objs = @(Get-VIObjectByVIView -Server $viConn -MORef $batch)
-                            foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $objs -ErrorAction Stop)) { $assignments.Add($a) }
+                            $ids = @($tagById.Keys | Where-Object { Test-InCategory $tagById[$_].Category.Name })
+                            for ($i = 0; $i -lt $ids.Count; $i += 100) {
+                                $chunk = @($ids[$i..([Math]::Min($i + 100, $ids.Count) - 1)])
+                                Show-Progress -Activity 'Reading tag assignments (tagging API)' -Index ($i + 1) -Total $ids.Count -Item "tags $($i + 1) to $($i + $chunk.Count)"
+                                foreach ($r in @($tagAssoc.list_attached_objects_on_tags($chunk))) {
+                                    foreach ($o in @($r.object_ids)) { $assoc.Add([pscustomobject]@{ TagId = "$($r.tag_id)"; EntityId = "$($o.type)-$($o.id)" }) }
+                                }
+                            }
+                            $viaApi = $true
                         } catch {
-                            Write-Log "Reading the tags of $($batch.Count) object(s) in one call failed ($(Get-FailReason $_)); reading them one by one." -Level WARNING
-                            foreach ($ref in $batch) {
-                                try {
-                                    $o = Get-VIObjectByVIView -Server $viConn -MORef $ref
-                                    foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $o -ErrorAction Stop)) { $assignments.Add($a) }
-                                } catch {
+                            Write-Log "Reading through the tagging API failed ($(Get-FailReason $_)); reading the tags per object instead (slower)." -Level WARNING
+                            $assoc.Clear()
+                        }
+                    }
+                    if (-not $viaApi) {
+                        # Fallback: per object of the supported types, never
+                        # Get-TagAssignment without -Entity (#4), which resolves every
+                        # association in vCenter and stopped on one PowerCLI can't load.
+                        # Batches of 200; a batch that fails is read one object at a time.
+                        $refs = @($selected.Values | ForEach-Object { $_.MoRef })
+                        $batchSize = 200
+                        for ($i = 0; $i -lt $refs.Count; $i += $batchSize) {
+                            Show-Progress -Activity 'Reading tag assignments' -Index ($i + 1) -Total $refs.Count -Item "objects $($i + 1) to $([Math]::Min($i + $batchSize, $refs.Count))"
+                            $batch = @($refs[$i..([Math]::Min($i + $batchSize, $refs.Count) - 1)])
+                            try {
+                                $objs = @(Get-VIObjectByVIView -Server $viConn -MORef $batch)
+                                foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $objs -ErrorAction Stop)) { $assoc.Add([pscustomobject]@{ TagId = "$($a.Tag.Id)"; EntityId = "$($a.Entity.Id)" }) }
+                            } catch {
+                                Write-Log "Reading the tags of $($batch.Count) object(s) in one call failed ($(Get-FailReason $_)); reading them one by one." -Level WARNING
+                                foreach ($ref in $batch) {
                                     $e = $selected[$ref.Value]
-                                    Add-RunFailure -Action 'Read tags' -Name "$($e.Type) '$($e.Name)'" -Reason (Get-FailReason $_)
+                                    try {
+                                        $o = Get-VIObjectByVIView -Server $viConn -MORef $ref
+                                        foreach ($a in @(Get-TagAssignment -Server $viConn -Entity $o -ErrorAction Stop)) { $assoc.Add([pscustomobject]@{ TagId = "$($a.Tag.Id)"; EntityId = "$($a.Entity.Id)" }) }
+                                    } catch {
+                                        $why = Get-FailReason $_
+                                        if ($why -match 'has already been deleted|ManagedObjectNotFound') {
+                                            # Gone between reading the inventory and reading its
+                                            # tags (seen: a Kubernetes control-plane VM that the
+                                            # Supervisor replaced): a skip, not a failure (#9)
+                                            $readGone++
+                                            Write-Log "Skipped $($e.Type) '$($e.Name)': it disappeared during the export." -Level WARNING
+                                        } else {
+                                            Add-RunFailure -Action 'Read tags' -Name "$($e.Type) '$($e.Name)'" -Reason $why
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1184,31 +1258,29 @@ if ($Mode -eq 'Export') {
                     if (-not $waveActive) {
                         Write-Log 'Tags on other kinds of objects (content library items, first-class disks and the like) are not read.'
                     }
-                    # Match each association to a real tag by its id (#4). Per object,
-                    # vCenter 9 also returns the vSphere Zone of a cluster as an
-                    # association (tag id ...:zone-<name>:GLOBAL) with no name and no
-                    # category; it is not a tag, so it is left out (log file only).
-                    $tagById = @{}
-                    foreach ($t in @(Get-Tag -Server $viConn)) { $tagById["$($t.Id)"] = $t }
                     $skippedTypes = @{}
-                    foreach ($a in $assignments) {
-                        if (-not $tagById.ContainsKey("$($a.Tag.Id)")) {
-                            Write-Log "Left out $($a.Entity.Id): association $($a.Tag.Id) is not a tag (for example a vSphere Zone)." -FileOnly
+                    foreach ($a in $assoc) {
+                        if (-not $tagById.ContainsKey($a.TagId)) {
+                            Write-Log "Left out $($a.EntityId): association $($a.TagId) is not a tag (for example a vSphere Zone)." -FileOnly
                             continue
                         }
-                        $realTag = $tagById["$($a.Tag.Id)"]
+                        $realTag = $tagById[$a.TagId]
                         if (-not (Test-InCategory $realTag.Category.Name)) { continue }
-                        $id = Split-EntityId "$($a.Entity.Id)"
+                        $id = Split-EntityId $a.EntityId
                         if ($null -eq $id -or -not $selected.ContainsKey($id.Value) -or $selected[$id.Value].Type -ne $id.Type) {
-                            $label = if ($id) { $id.Type } else { "$($a.Entity.Id)" }
-                            $skippedTypes[$label] = 1 + $(if ($skippedTypes.ContainsKey($label)) { $skippedTypes[$label] } else { 0 })
+                            # Through the tagging API every tagged object comes back, also
+                            # other types and (with a VM filter) VMs outside the wave
+                            if (-not $viaApi) {
+                                $label = if ($id) { $id.Type } else { $a.EntityId }
+                                $skippedTypes[$label] = 1 + $(if ($skippedTypes.ContainsKey($label)) { $skippedTypes[$label] } else { 0 })
+                            }
                             continue
                         }
-                        $tagAssignments += [pscustomobject]@{
+                        $tagAssignments.Add([pscustomobject]@{
                             Entity   = Get-EntityRecord $selected[$id.Value]
                             Category = $realTag.Category.Name
                             Tag      = $realTag.Name
-                        }
+                        })
                     }
                     if (-not $waveActive) {
                         foreach ($k in $skippedTypes.Keys) {
@@ -1220,7 +1292,7 @@ if ($Mode -eq 'Export') {
                 Complete-Progress
 
                 # Custom attribute values
-                $attributeValues = @()
+                $attributeValues = [System.Collections.Generic.List[object]]::new()
                 foreach ($e in $selected.Values) {
                     foreach ($key in $e.CustomValue.Keys) {
                         $val = $e.CustomValue[$key]
@@ -1228,12 +1300,12 @@ if ($Mode -eq 'Export') {
                         if (-not $fieldById.ContainsKey($key)) { continue }
                         $f = $fieldById[$key]
                         if (Test-SystemAttribute $f.Name $f.ManagedObjectType) { continue }
-                        $attributeValues += [pscustomobject]@{
+                        $attributeValues.Add([pscustomobject]@{
                             Entity     = Get-EntityRecord $e
                             Attribute  = $f.Name
                             TargetType = if ($f.ManagedObjectType) { [string]$f.ManagedObjectType } else { $null }
                             Value      = $val
-                        }
+                        })
                     }
                 }
 
@@ -1256,11 +1328,13 @@ if ($Mode -eq 'Export') {
             Write-Log "Exported: $jsonPath" -Level SUCCESS
         }
         $readFail   = @($script:RunFailures | Where-Object { $_.Action -eq 'Read tags' }).Count
+        $readGone   = if (Test-Path variable:readGone) { $readGone } else { 0 }
         $exportFail = $(if ($ok) { 0 } else { 1 }) + $readFail
+        $gone       = if ($readGone -gt 0) { " $readGone object(s) disappeared during the export and were skipped." } else { '' }
         $exportLine = if (-not $ok) { 'Export failed: nothing written.' }
-                      elseif ($readFail -gt 0) { "Export complete: $($parts -join ' and ') written, without the tags of $readFail object(s) that could not be read." }
-                      else { "Export complete: $($parts -join ' and ') written." }
-        Write-RunSummary -Line $exportLine -Failed $exportFail -Actions 'Export', 'Read tags'
+                      elseif ($readFail -gt 0) { "Export complete: $($parts -join ' and ') written, without the tags of $readFail object(s) that could not be read.$gone" }
+                      else { "Export complete: $($parts -join ' and ') written.$gone" }
+        Write-RunSummary -Line $exportLine -Failed $exportFail -Skipped $readGone -Actions 'Export', 'Read tags'
     }
 }
 
@@ -1576,12 +1650,43 @@ if ($Mode -eq 'Import') {
                         # back as an association without name or category
                         $tagById = @{}
                         foreach ($t in $tagByKey.Values) { $tagById["$($t.Id)"] = $t }
-                        foreach ($a in @(Get-TagAssignment -Server $viConn -Entity @($viObjects.Values))) {
-                            $id = Split-EntityId "$($a.Entity.Id)"
+                        # Current tags of the objects involved: through the tagging API
+                        # (#9), 500 objects per call; per object with Get-TagAssignment
+                        # when the API is not available or fails
+                        $current = [System.Collections.Generic.List[object]]::new()
+                        $viaApi = $false
+                        if ($tagAssoc) {
+                            try {
+                                $targets = @($tagTargets.Values)
+                                for ($i = 0; $i -lt $targets.Count; $i += 500) {
+                                    $chunk = @($targets[$i..([Math]::Min($i + 500, $targets.Count) - 1)])
+                                    Show-Progress -Activity 'Reading the current tags (tagging API)' -Index ($i + 1) -Total $targets.Count -Item "objects $($i + 1) to $($i + $chunk.Count)"
+                                    $objIds = foreach ($t in $chunk) {
+                                        $d = $tagAssoc.Help.list_attached_tags_on_objects.object_ids.Element.Create()
+                                        $d.type = $t.MoRef.Type; $d.id = $t.MoRef.Value; $d
+                                    }
+                                    foreach ($r in @($tagAssoc.list_attached_tags_on_objects(@($objIds)))) {
+                                        foreach ($tid in @($r.tag_ids)) { $current.Add([pscustomobject]@{ TagId = "$tid"; EntityId = "$($r.object_id.type)-$($r.object_id.id)" }) }
+                                    }
+                                }
+                                $viaApi = $true
+                            } catch {
+                                Write-Log "Reading the current tags through the tagging API failed ($(Get-FailReason $_)); reading them per object instead (slower)." -Level WARNING
+                                $current.Clear()
+                            }
+                            Complete-Progress
+                        }
+                        if (-not $viaApi) {
+                            foreach ($a in @(Get-TagAssignment -Server $viConn -Entity @($viObjects.Values))) {
+                                $current.Add([pscustomobject]@{ TagId = "$($a.Tag.Id)"; EntityId = "$($a.Entity.Id)" })
+                            }
+                        }
+                        foreach ($a in $current) {
+                            $id = Split-EntityId $a.EntityId
                             if (-not $id) { continue }
-                            if (-not $tagById.ContainsKey("$($a.Tag.Id)")) { continue }
+                            if (-not $tagById.ContainsKey($a.TagId)) { continue }
                             if (-not $currentTags.ContainsKey($id.Value)) { $currentTags[$id.Value] = New-Object System.Collections.Generic.List[object] }
-                            $currentTags[$id.Value].Add($tagById["$($a.Tag.Id)"])
+                            $currentTags[$id.Value].Add($tagById[$a.TagId])
                         }
                     }
 
@@ -1694,6 +1799,7 @@ if ($Mode -eq 'Import') {
 # DISCONNECT
 # =============================================================================
 Write-Log 'Disconnecting from vCenter...'
+if ($cisConn) { Disconnect-CisServer -Server $cisConn -Confirm:$false -ErrorAction SilentlyContinue }
 Disconnect-VIServer -Server $viConn -Confirm:$false
 if ($script:RunFailures.Count -gt 0) {
     Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR

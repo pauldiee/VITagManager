@@ -105,6 +105,13 @@
     Import mode: log what would be created, assigned and set without
     changing anything.
 
+.PARAMETER Report
+    Export mode: also write an HTML report next to the JSON file (same name,
+    .html) that shows what the export holds. It's the VI Export Viewer from
+    report\viewer.html with the export embedded: one file, opens offline in
+    any browser, can be printed to PDF. Drop a second export on it to compare
+    source and target.
+
 .PARAMETER CredentialPath
     Path to the saved credential file. Defaults to <vCenterServer>.cred
     next to the script.
@@ -139,9 +146,13 @@
     # Only the categories that matter, e.g. those used by storage policies and backup
     .\Invoke-VITagManager.ps1 -vCenterServer vc-old.lab.local -Mode Export -Content Definitions -Category 'Storage*','Backup'
 
+.EXAMPLE
+    # Export with an HTML report to check what went into the file
+    .\Invoke-VITagManager.ps1 -vCenterServer vc-old.lab.local -Mode Export -Content Definitions,Assignments -Report
+
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.2.1
+    Version  : 1.3.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -158,6 +169,14 @@
 
 <#
 CHANGELOG
+    v1.3.0  2026-11-19  Paul van Dieen
+        - -Report: an HTML report next to the export (VI Export Viewer 0.2.0
+          with the export embedded, report\viewer.html): overview, compare
+          with a second export, print to PDF. ITQ house style without
+          logos, works offline. Every '<' in the export is escaped, so no
+          name can end the embedded block (the 2026-11-16 draft of this
+          feature had a no-op escape and was never released)
+
     v1.2.1  2026-11-19  Paul van Dieen
         - Reading the inventory objects shows progress (#11): the objects of
           each type are read through vCenter's PropertyCollector in pages
@@ -330,6 +349,9 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
+    [switch]$Report,
+
+    [Parameter(Mandatory = $false)]
     [string]$FilePath = '',
 
     [Parameter(Mandatory = $false)]
@@ -348,7 +370,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.1'
+$scriptVersion = '1.3.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -974,6 +996,10 @@ function Test-SystemAttribute {
     return $false
 }
 
+if ($Mode -eq 'Import' -and $Report) {
+    Write-Host '  [WARN] -Report only applies in Export mode and will be ignored.' -ForegroundColor Yellow
+}
+
 # --- Credential Management ------------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
 # Next to the script, as in the other toolkits (#8; up to 1.0.0 it was creds\)
@@ -1178,6 +1204,31 @@ function Split-EntityId {
     $i = $Id.IndexOf('-')
     if ($i -lt 1) { return $null }
     return [pscustomobject]@{ Type = $Id.Substring(0, $i); Value = $Id.Substring($i + 1) }
+}
+
+function Write-ExportReport {
+    # -Report: the VI Export Viewer (report\viewer.html) with the export
+    # embedded, written next to the JSON. Same code as New-VIExportReport.ps1
+    # 0.1.1 in the VIExportViewer repo. The file is embedded as it is; every
+    # '<' becomes the JSON escape backslash-u003c (backslash built with
+    # [char]92, so no editor can strip it), so no export text can close the
+    # script element; JSON.parse in the browser turns it back into '<'.
+    param([string]$JsonPath)
+    $viewer = Join-Path (Join-Path $scriptDir 'report') 'viewer.html'
+    $marker = '<script type="application/json" id="vi-embedded">[]</script>'
+    try {
+        if (-not (Test-Path -Path $viewer -PathType Leaf)) { throw "report\viewer.html not found next to the script" }
+        $html = Get-Content -Path $viewer -Raw -Encoding UTF8
+        if (-not $html.Contains($marker)) { throw "report\viewer.html has no embed block" }
+        $raw  = (Get-Content -Path $JsonPath -Raw -Encoding UTF8).TrimStart([char]0xFEFF)
+        $item = '{"fileName":' + (ConvertTo-Json -InputObject (Split-Path $JsonPath -Leaf) -Compress) + ',"data":' + $raw + '}'
+        $json = ('[' + $item + ']').Replace('<', ([string][char]92 + 'u003c'))
+        $out  = [System.IO.Path]::ChangeExtension($JsonPath, '.html')
+        Set-Content -Path $out -Value ($html.Replace($marker, '<script type="application/json" id="vi-embedded">' + $json + '</script>')) -Encoding UTF8 -NoNewline
+        Write-Log "Report: $out (open it in a browser; drop a second export on it to compare)" -Level SUCCESS
+    } catch {
+        Write-Log "Report not written: $($_.Exception.Message). The export itself is fine." -Level WARNING
+    }
 }
 
 function Get-FieldTypeLabel {
@@ -1422,6 +1473,7 @@ if ($Mode -eq 'Export') {
             $jsonPath = Join-Path $BackupDirectory "Tags_${safeVc}_${suffix}_$timestamp.json"
             ConvertTo-Json -InputObject ([pscustomobject]$export) -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
             Write-Log "Exported: $jsonPath" -Level SUCCESS
+            if ($Report) { Write-ExportReport -JsonPath $jsonPath }
         }
         $readFail   = @($script:RunFailures | Where-Object { $_.Action -eq 'Read tags' }).Count
         $readGone   = if (Test-Path variable:readGone) { $readGone } else { 0 }

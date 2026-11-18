@@ -4,10 +4,10 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 0.2.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.0.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
-> **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
+> **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) and the 1.0.0 fix on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
 
 ---
 
@@ -60,7 +60,9 @@ Custom attributes that vCenter and other products create and manage themselves a
 
 Writes `Tags_<vcenter>_<Definitions|Assignments|All>_<timestamp>.json` to the backup directory.
 
-Assignments cover VMs and templates, hosts, clusters, standalone hosts, datacenters, datastores, datastore clusters, folders, resource pools, vApps, distributed switches, distributed port groups and standard networks. Tags on other kinds of objects (for example content library items) are skipped and counted in the log. With `-VMName` or `-VMListPath` only those VMs are exported.
+Assignments cover VMs and templates, hosts, clusters, standalone hosts, datacenters, datastores, datastore clusters, folders, resource pools, vApps, distributed switches, distributed port groups and standard networks. Tags on other kinds of objects (for example content library items or first-class disks) are not read. With `-VMName` or `-VMListPath` only those VMs are exported.
+
+Tags are read per object, 200 objects per call. Reading all tag assignments of a vCenter in one call (`Get-TagAssignment` without `-Entity`) stops on the first tag on an object PowerCLI can't load: on a vCenter 8.0.3 that ended a whole export with *"The object 'vim.vslm.host.VStorageObjectManager:vstorageObjectManager' has already been deleted or has not been completely created"* (field report, #4). If a call of 200 objects fails anyway, they are read again one at a time; an object whose tags can't be read is a red `FAILED read tags` line, and the export is still written without that object's tags.
 
 For VMs the export also records the instance UUID and BIOS UUID; they are only used on import to tell apart VMs with the same name.
 

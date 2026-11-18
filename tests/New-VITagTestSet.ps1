@@ -62,7 +62,7 @@
     the source's 'dup-prod' copy.
 
 .PARAMETER CredentialPath
-    Saved credential file. Defaults to creds\<vCenterServer>.cred in the repo
+    Saved credential file. Defaults to <vCenterServer>.cred in the repo
     root (where Invoke-VITagManager.ps1 keeps it), else a prompt.
 
 .PARAMETER SkipCertificateValidation
@@ -154,7 +154,7 @@ function Say { param([string]$Text, [string]$Color = 'Cyan') Write-Host "  $Text
 
 # --- Connect ------------------------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
-if (-not $CredentialPath) { $CredentialPath = Join-Path (Join-Path (Split-Path $scriptDir -Parent) 'creds') "$safeVc.cred" }
+if (-not $CredentialPath) { $CredentialPath = Join-Path (Split-Path $scriptDir -Parent) "$safeVc.cred" }
 $credential = if (Test-Path $CredentialPath) { Import-Clixml -Path $CredentialPath } else { Get-Credential -Message "Credentials for $vCenterServer" }
 $null = Set-PowerCLIConfiguration -InvalidCertificateAction $(if ($SkipCertificateValidation) { 'Ignore' } else { 'Warn' }) `
     -Confirm:$false -Scope Session -WarningAction SilentlyContinue

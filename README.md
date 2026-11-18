@@ -4,7 +4,7 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 1.0.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.1.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
 > **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) and the 1.0.0 fix on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
@@ -20,7 +20,7 @@ The script connects to a vCenter and runs one of two modes (`-Mode Export|Import
 | Definitions | Tag categories (description, cardinality, entity types), tags (description), custom attribute names with their target type (or global) |
 | Assignments | Which object carries which tag, and the custom attribute values per object |
 
-Every picker accepts single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (or `exit`, `quit`, `q`). Every action is logged to the console and a timestamped log file.
+Every picker accepts single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (or `exit`, `quit`, `q`). Every action is logged to the console and a timestamped log file. Long steps show a progress bar with "n of N: item", the percentage and the time left; it disappears when the step ends.
 
 **Backup directory.** Without `-BackupDirectory`, an interactive run asks for it right after the mode: **Enter** keeps the default `Backups\` next to the script, **B** opens the Windows folder browser (only where a GUI is available), or type a path. Import shows how many exports (`Tags_*.json`) the folder holds and asks again when it holds none. An unattended run (`-Content` on Export, `-FilePath` or `-Force` on Import) doesn't ask.
 
@@ -134,7 +134,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-FilePath` | Import: the export file to import, instead of the menu. A path or a name, wildcards allowed (a bare name is also looked up in the backup directory); the newest match wins |
 | `-Force` | Import: no confirmation question (scripted runs; try `-DryRun` first) |
 | `-DryRun` | Import: show what would change, change nothing |
-| `-CredentialPath` | Default: `creds\<vCenterServer>.cred` next to the script |
+| `-CredentialPath` | Default: `<vCenterServer>.cred` next to the script |
 | `-ResetCredentials` | Prompt for new credentials |
 | `-SkipCertificateValidation` | Accept self-signed certificates (lab use) |
 
@@ -144,7 +144,9 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 
 ## Credentials
 
-Saved with `Export-Clixml` as `creds\<vCenterServer>.cred` next to the script. On Windows the password is DPAPI-encrypted for the current user; on Linux and macOS it is **not** encrypted. `*.cred` files and `creds/` are git-ignored.
+Saved with `Export-Clixml` as `<vCenterServer>.cred` next to the script, as in the other toolkits. On Windows the password is DPAPI-encrypted for the current user; on Linux and macOS it is **not** encrypted. `*.cred` files and `creds/` are git-ignored.
+
+Up to 1.0.0 the file was `creds\<vCenterServer>.cred`. 1.1.0 no longer looks there: the first run asks for the credential once and saves it next to the script. Delete the old `creds\` folder afterwards, or pass `-CredentialPath` to keep using a file there.
 
 ## Credits
 

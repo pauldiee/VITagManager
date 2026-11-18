@@ -36,7 +36,7 @@
     All activity is written to both the console and a timestamped log file.
     Use -DryRun to see what Import would change without changing anything.
 
-    Credentials are saved as creds\<hostname>.cred next to the script using
+    Credentials are saved as <hostname>.cred next to the script using
     Export-Clixml (DPAPI-protected on Windows, tied to the current user; NOT
     encrypted on Linux/macOS).
 
@@ -106,7 +106,7 @@
     changing anything.
 
 .PARAMETER CredentialPath
-    Path to the saved credential file. Defaults to creds\<vCenterServer>.cred
+    Path to the saved credential file. Defaults to <vCenterServer>.cred
     next to the script.
 
 .PARAMETER ResetCredentials
@@ -141,7 +141,7 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.0.0
+    Version  : 1.1.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -157,6 +157,19 @@
 
 <#
 CHANGELOG
+    v1.1.0  2026-11-18  Paul van Dieen
+        - Progress bar during long steps (#6): "n of N: item", the
+          percentage and the time left, in the export while it reads the
+          inventory objects and the tags (200 objects per step), and the
+          import per category, tag, attribute, tag assignment and attribute
+          value. Updated at most every 250 ms; the bar disappears when the
+          step ends. The log file is unchanged
+        - The saved credential is <vCenterServer>.cred next to the script,
+          as in the other toolkits (#8); up to 1.0.0 it was
+          creds\<vCenterServer>.cred. No transition: a file in creds\ is no
+          longer used, so the first run asks for the credential once (or
+          pass -CredentialPath). Same in tests\New-VITagTestSet.ps1
+
     v1.0.0  2026-11-18  Paul van Dieen
         - Fix (#4): an export of Assignments without a VM filter stopped with
           "The object 'vim.vslm.host.VStorageObjectManager:...' has already
@@ -294,7 +307,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.0'
+$scriptVersion = '1.1.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -441,6 +454,49 @@ function Write-RunSummary {
         Write-Log "  Failed ($($mine.Count)):" -Level ERROR
         foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
     }
+}
+
+# --- Progress (#6) -------------------------------------------------------------
+# A progress bar per long step: "12 of 637: name", percentage and time left.
+# Updated at most every 250 ms, so thousands of items don't slow the run down;
+# Complete-Progress removes the bar. Id 1 is the outer step, Id 2 the items
+# inside it. The log file is unchanged.
+$script:ProgressState = @{}
+function Show-Progress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [string]$Item = '',
+        [int]$Id = 1,
+        [int]$ParentId = -1
+    )
+    if ($Total -le 0) { return }
+    $now = [DateTime]::UtcNow
+    if (-not $script:ProgressState.ContainsKey($Id) -or $Index -le 1) {
+        $script:ProgressState[$Id] = @{ Start = $now; Last = [DateTime]::MinValue }
+    }
+    $st = $script:ProgressState[$Id]
+    if ($Index -gt 1 -and $Index -lt $Total -and ($now - $st.Last).TotalMilliseconds -lt 250) { return }
+    $st.Last = $now
+    $p = @{
+        Id              = $Id
+        Activity        = $Activity
+        Status          = "$Index of $Total$(if ($Item) { ": $Item" })"
+        PercentComplete = [Math]::Min(100, [int](100 * ($Index - 1) / $Total))
+    }
+    if ($Index -gt 1) {
+        $perItem = ($now - $st.Start).TotalSeconds / ($Index - 1)
+        $p.SecondsRemaining = [int]($perItem * ($Total - $Index + 1))
+    }
+    if ($ParentId -ge 0) { $p.ParentId = $ParentId }
+    Write-Progress @p
+}
+
+function Complete-Progress {
+    param([int]$Id = 1)
+    $null = $script:ProgressState.Remove($Id)
+    Write-Progress -Id $Id -Activity 'Done' -Completed
 }
 
 # --- Menu Functions -------------------------------------------------------------
@@ -867,7 +923,8 @@ function Test-SystemAttribute {
 
 # --- Credential Management ------------------------------------------------------
 $safeVc = $vCenterServer -replace '[^\w\-.]', '_'
-if (-not $CredentialPath) { $CredentialPath = Join-Path (Join-Path $scriptDir 'creds') "$safeVc.cred" }
+# Next to the script, as in the other toolkits (#8; up to 1.0.0 it was creds\)
+if (-not $CredentialPath) { $CredentialPath = Join-Path $scriptDir "$safeVc.cred" }
 $credDir = Split-Path -Parent $CredentialPath
 if ($credDir -and -not (Test-Path $credDir)) { New-Item -ItemType Directory -Path $credDir -Force | Out-Null }
 
@@ -939,7 +996,10 @@ function Get-EntityIndex {
     # Type, Name, MoRef, InstanceUuid/BiosUuid (VMs), CustomValue (key -> value).
     param([string[]]$Types)
     $index = @{}
+    $tNo = 0
     foreach ($t in $Types) {
+        $tNo++
+        Show-Progress -Activity 'Reading inventory objects' -Index $tNo -Total $Types.Count -Item $t
         $props = @('Name', 'CustomValue')
         if ($t -eq 'VirtualMachine') { $props += @('Config.InstanceUuid', 'Config.Uuid') }
         try {
@@ -966,6 +1026,7 @@ function Get-EntityIndex {
             }
         }
     }
+    Complete-Progress
     return $index
 }
 
@@ -1102,6 +1163,7 @@ if ($Mode -eq 'Export') {
                     $refs = @($selected.Values | ForEach-Object { $_.MoRef })
                     $batchSize = 200
                     for ($i = 0; $i -lt $refs.Count; $i += $batchSize) {
+                        Show-Progress -Activity 'Reading tag assignments' -Index ($i + 1) -Total $refs.Count -Item "objects $($i + 1) to $([Math]::Min($i + $batchSize, $refs.Count))"
                         $batch = @($refs[$i..([Math]::Min($i + $batchSize, $refs.Count) - 1)])
                         try {
                             $objs = @(Get-VIObjectByVIView -Server $viConn -MORef $batch)
@@ -1154,6 +1216,8 @@ if ($Mode -eq 'Export') {
                         }
                     }
                 }
+
+                Complete-Progress
 
                 # Custom attribute values
                 $attributeValues = @()
@@ -1315,7 +1379,11 @@ if ($Mode -eq 'Import') {
                     Write-Log '--- Definitions ---'
                     $s = @{ CatNew = 0; CatOld = 0; CatDiff = 0; CatFail = 0; TagNew = 0; TagOld = 0; TagSkip = 0; TagFail = 0; AttrNew = 0; AttrOld = 0; AttrDiff = 0; AttrFail = 0 }
 
-                    foreach ($c in @($data.Definitions.TagCategories | Where-Object { $null -ne $_ -and (Test-InCategory $_.Name) })) {
+                    $list = @($data.Definitions.TagCategories | Where-Object { $null -ne $_ -and (Test-InCategory $_.Name) })
+                    $no = 0
+                    foreach ($c in $list) {
+                        $no++
+                        Show-Progress -Activity 'Tag categories' -Index $no -Total $list.Count -Item $c.Name
                         # 'All' (no restriction) is the default of New-TagCategory
                         $entityType = @($c.EntityType | Where-Object { $_ -and $_ -ne 'All' })
                         $typeLabel  = if ($entityType.Count -gt 0) { $entityType -join ', ' } else { 'no restriction' }
@@ -1347,7 +1415,11 @@ if ($Mode -eq 'Import') {
                         }
                     }
 
-                    foreach ($t in @($data.Definitions.Tags | Where-Object { $null -ne $_ -and (Test-InCategory $_.Category) })) {
+                    $list = @($data.Definitions.Tags | Where-Object { $null -ne $_ -and (Test-InCategory $_.Category) })
+                    $no = 0
+                    foreach ($t in $list) {
+                        $no++
+                        Show-Progress -Activity 'Tags' -Index $no -Total $list.Count -Item "$($t.Category)/$($t.Name)"
                         $key = "$($t.Category)|$($t.Name)"
                         if ($tagByKey.ContainsKey($key)) { $s.TagOld++; continue }
                         if (-not $catByName.ContainsKey($t.Category)) {
@@ -1377,7 +1449,11 @@ if ($Mode -eq 'Import') {
                         }
                     }
 
-                    foreach ($a in @($data.Definitions.CustomAttributes | Where-Object { $null -ne $_ -and -not (Test-SystemAttribute $_.Name $_.TargetType) })) {
+                    $list = @($data.Definitions.CustomAttributes | Where-Object { $null -ne $_ -and -not (Test-SystemAttribute $_.Name $_.TargetType) })
+                    $no = 0
+                    foreach ($a in $list) {
+                        $no++
+                        Show-Progress -Activity 'Custom attributes' -Index $no -Total $list.Count -Item $a.Name
                         $label = "'$($a.Name)' ($(Get-FieldTypeLabel $a.TargetType))"
                         $found = Find-Field -Name $a.Name -TargetType $a.TargetType
                         if ($found) {
@@ -1406,6 +1482,7 @@ if ($Mode -eq 'Import') {
                             $s.AttrFail++
                         }
                     }
+                    Complete-Progress
 
                     # Summaries (#2): red with failures, yellow with only skips, green otherwise
                     Write-RunSummary -Line "Tag categories: $($s.CatNew) ${verb}created, $($s.CatOld) already present ($($s.CatDiff) with different settings), $($s.CatFail) failed." `
@@ -1508,7 +1585,10 @@ if ($Mode -eq 'Import') {
                         }
                     }
 
+                    $no = 0
                     foreach ($ta in $tagEntries) {
+                        $no++
+                        Show-Progress -Activity 'Tag assignments' -Index $no -Total $tagEntries.Count -Item "$($ta.Category)/$($ta.Tag) on $($ta.Entity.Name)"
                         $e = Resolve-Entity $ta.Entity
                         if (-not $e) { $s.TagNoObj++; continue }
                         $label = "tag '$($ta.Category)/$($ta.Tag)' on $($e.Type) '$($e.Name)'"
@@ -1556,7 +1636,10 @@ if ($Mode -eq 'Import') {
                         $currentTags[$e.MoRef.Value].Add($tag)
                     }
 
+                    $no = 0
                     foreach ($av in $valEntries) {
+                        $no++
+                        Show-Progress -Activity 'Custom attribute values' -Index $no -Total $valEntries.Count -Item "$($av.Attribute) on $($av.Entity.Name)"
                         $e = Resolve-Entity $av.Entity
                         if (-not $e) { $s.ValNoObj++; continue }
                         $label = "attribute '$($av.Attribute)' on $($e.Type) '$($e.Name)'"
@@ -1589,6 +1672,7 @@ if ($Mode -eq 'Import') {
                             $s.ValFail++
                         }
                     }
+                    Complete-Progress
 
                     # Objects not found are normal during a migration (not moved yet), so
                     # they don't colour the line; they are listed in the log file

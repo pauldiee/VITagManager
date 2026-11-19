@@ -48,7 +48,7 @@
 
 .NOTES
     Script   : New-VITagScaleSet.ps1
-    Version  : 0.1.0
+    Version  : 0.1.1
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ or VMware.PowerCLI 13+
@@ -58,6 +58,12 @@
 
 <#
 CHANGELOG
+    v0.1.1  2026-11-19  Paul van Dieen
+        - The tagging service is taken from this script's own CIS connection
+          (Get-CisService -Server): in an interactive session it took the
+          default CIS server and failed with "Server session is not
+          established"
+
     v0.1.0  2026-11-19  Paul van Dieen
         - Initial version: Create and Remove of a large folder/tag set for
           scale tests of Invoke-VITagManager.ps1 (#11)
@@ -88,7 +94,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '0.1.0'
+$scriptVersion = '0.1.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -173,9 +179,12 @@ try {
         Say "Tag categories: $($catSpec.Count), tags: $(($catSpec.Values | Measure-Object -Sum).Sum)"
 
         # --- Tag assignments through the tagging API ----------------------------
-        $null = Connect-CisServer -Server $vCenterServer -Credential $credential -WarningAction SilentlyContinue
+        # Keep the connection and pass it on: without -Server, Get-CisService takes
+        # the session's default CIS server, which in an interactive session can
+        # be an older or expired one ("Server session is not established")
+        $cis = Connect-CisServer -Server $vCenterServer -Credential $credential -ErrorAction Stop -WarningAction SilentlyContinue
         try {
-            $assocSvc = Get-CisService -Name 'com.vmware.cis.tagging.tag_association'
+            $assocSvc = Get-CisService -Server $cis -Name 'com.vmware.cis.tagging.tag_association' -ErrorAction Stop
             # Folder i gets tag (i mod count) of every category
             $plan = @{}
             for ($i = 0; $i -lt $folders.Count; $i++) {
@@ -202,7 +211,7 @@ try {
             Write-Progress -Activity 'Attaching tags (tagging API)' -Completed
             Say "Tag assignments: $done (existing ones are kept as they are)"
         } finally {
-            Disconnect-CisServer -Server $vCenterServer -Confirm:$false -ErrorAction SilentlyContinue
+            Disconnect-CisServer -Server $cis -Confirm:$false -ErrorAction SilentlyContinue
         }
 
         # --- Custom attribute values ------------------------------------------

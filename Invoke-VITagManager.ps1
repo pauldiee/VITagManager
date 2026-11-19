@@ -141,13 +141,14 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.2.0
+    Version  : 1.2.1
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : Lab, 2026-11-16: vCenter 8.0.3 to VCF 9.1.1 and VCF 9.0.2 to
                9.1.1 (definitions, folder and VM wave assignments); see
-               tests/TESTPLAN.md
+               tests/TESTPLAN.md. Lab, 2026-11-19: VCF 9.1.1 with 2608
+               objects and 10007 tag assignments (tests/New-VITagScaleSet.ps1)
     Credit   : The split between definitions (carried over once) and assignments
                (captured per wave, right before the move) follows Jim Millard,
                "Migrating tags after cross-vCenter vMotion" (Copy-vcTags.ps1 and
@@ -157,6 +158,24 @@
 
 <#
 CHANGELOG
+    v1.2.1  2026-11-19  Paul van Dieen
+        - Reading the inventory objects shows progress (#11): the objects of
+          each type are read through vCenter's PropertyCollector in pages
+          (RetrievePropertiesEx), not in one Get-View call per type that
+          showed nothing for minutes on a large vCenter. Same speed as 1.2.0
+          (lab: 2608 objects in 8 s; Get-View -Id per batch was 13x slower)
+        - Log lines per step as well as the progress bar, because in some
+          consoles no progress bar shows at all (field, 2026-11-19): the
+          object count per type, every 1000 objects read, the tag reading,
+          and on import every 2000 assignments or values checked
+        - Import -DryRun through the tagging API no longer loads every
+          object as a PowerCLI object (only needed to assign tags): the
+          dry run of 10007 assignments from 1:30 to 9 s in the lab
+        - Lab: exports identical to 1.2.0 on vCenter 9.1.1 (107 and 2608
+          objects; the root folder 'Datacenters' included, like 1.2.0)
+        - tests/New-VITagScaleSet.ps1: a large folder/tag set for scale
+          tests (default 2500 folders, 10000 tag assignments)
+
     v1.2.0  2026-11-18  Paul van Dieen
         - Tag assignments are read through vCenter's tagging API
           (com.vmware.cis.tagging.tag_association, #9): every object id of
@@ -326,7 +345,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.0'
+$scriptVersion = '1.2.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1031,36 +1050,95 @@ function Get-Prop {
 function Get-EntityIndex {
     # All objects of the given types, keyed by MoRef value. Each entry:
     # Type, Name, MoRef, InstanceUuid/BiosUuid (VMs), CustomValue (key -> value).
+    #
+    # Read through vCenter's PropertyCollector in pages of $pageSize objects
+    # (RetrievePropertiesEx / ContinueRetrievePropertiesEx over a container
+    # view), so a large inventory shows progress per page instead of one long
+    # call without any (#11). As fast as the single Get-View -ViewType call it
+    # replaces; Get-View -Id per batch was 13x slower in the lab.
     param([string[]]$Types)
-    $index = @{}
+    $index    = @{}
+    $viewMgr  = Get-View -Server $viConn -Id $serviceInstance.Content.ViewManager
+    $propColl = Get-View -Server $viConn -Id $serviceInstance.Content.PropertyCollector
+    $rootRef  = $serviceInstance.Content.RootFolder
+    $pageSize = 500   # vCenter may return smaller pages (100 seen on 9.1.1)
     $tNo = 0
     foreach ($t in $Types) {
         $tNo++
         Show-Progress -Activity 'Reading inventory objects' -Index $tNo -Total $Types.Count -Item $t
-        $props = @('Name', 'CustomValue')
-        if ($t -eq 'VirtualMachine') { $props += @('Config.InstanceUuid', 'Config.Uuid') }
+        # Raw API property paths: case-sensitive, camelCase
+        $props = @('name', 'customValue')
+        if ($t -eq 'VirtualMachine') { $props += @('config.instanceUuid', 'config.uuid') }
+        $cvRef = $null
         try {
-            $views = @(Get-View -Server $viConn -ViewType $t -Property $props)
+            $cvRef = $viewMgr.CreateContainerView($rootRef, [string[]]@($t), $true)
+            # The total for the progress (object references only: light).
+            # Subtypes (ClusterComputeResource under ComputeResource, port
+            # groups under Network) are counted and read under their own type.
+            $total = @((Get-View -Server $viConn -Id $cvRef).View | Where-Object { $null -ne $_ -and $_.Type -eq $t }).Count
+            # A container view leaves out the container itself: the root
+            # folder ('Datacenters') can carry tags and attributes too
+            if ($t -eq 'Folder') { $total++ }
+            # Also as log lines: in some consoles (RDP sessions, a host with
+            # $ProgressPreference off) no progress bar shows at all (#11)
+            Write-Log "  $t`: $total object(s)"
+
+            $trav = New-Object VMware.Vim.TraversalSpec
+            $trav.Name = 'view'; $trav.Type = 'ContainerView'; $trav.Path = 'view'; $trav.Skip = $false
+            $objSpec = New-Object VMware.Vim.ObjectSpec
+            $objSpec.Obj = $cvRef; $objSpec.Skip = $true; $objSpec.SelectSet = @($trav)
+            $objSpecs = @($objSpec)
+            if ($t -eq 'Folder') {
+                $rootSpec = New-Object VMware.Vim.ObjectSpec
+                $rootSpec.Obj = $rootRef; $rootSpec.Skip = $false
+                $objSpecs += $rootSpec
+            }
+            $propSpec = New-Object VMware.Vim.PropertySpec
+            $propSpec.Type = $t; $propSpec.PathSet = [string[]]$props
+            $filter = New-Object VMware.Vim.PropertyFilterSpec
+            $filter.ObjectSet = $objSpecs; $filter.PropSet = @($propSpec)
+            $options = New-Object VMware.Vim.RetrieveOptions
+            $options.MaxObjects = $pageSize
+
+            $read   = 0
+            $logged = 0
+            $res  = $propColl.RetrievePropertiesEx(@($filter), $options)
+            while ($null -ne $res) {
+                foreach ($oc in @($res.Objects)) {
+                    if ($null -eq $oc -or $oc.Obj.Type -ne $t) { continue }
+                    $read++
+                    $pv = @{}
+                    foreach ($dp in @($oc.PropSet)) { if ($null -ne $dp) { $pv[$dp.Name] = $dp.Val } }
+                    $values = @{}
+                    foreach ($cv in @($pv['customValue'])) {
+                        if ($null -eq $cv) { continue }
+                        $val = Get-Prop $cv 'Value'
+                        if ($null -ne $val) { $values[[int]$cv.Key] = [string]$val }
+                    }
+                    $index[$oc.Obj.Value] = [pscustomobject]@{
+                        Type         = $t
+                        Name         = [string]$pv['name']
+                        MoRef        = $oc.Obj
+                        InstanceUuid = if ($t -eq 'VirtualMachine') { $pv['config.instanceUuid'] } else { $null }
+                        BiosUuid     = if ($t -eq 'VirtualMachine') { $pv['config.uuid'] } else { $null }
+                        CustomValue  = $values
+                    }
+                }
+                if ($total -gt $pageSize) {
+                    Show-Progress -Id 2 -ParentId 1 -Activity "Reading $t" -Index ([Math]::Min($read + 1, $total)) -Total $total -Item "$read read"
+                    if ($res.Token -and [Math]::Floor($read / 1000) -gt $logged) {
+                        $logged = [Math]::Floor($read / 1000)
+                        Write-Log "  $t`: $read of $total read ..."
+                    }
+                }
+                if (-not $res.Token) { break }
+                $res = $propColl.ContinueRetrievePropertiesEx($res.Token)
+            }
+            Complete-Progress -Id 2
         } catch {
-            Write-Log "Could not list objects of type $t`: $(Get-ErrorDetail $_)" -Level WARNING
-            continue
-        }
-        foreach ($v in $views) {
-            if ($v.MoRef.Type -ne $t) { continue }
-            $values = @{}
-            foreach ($cv in @(Get-Prop $v 'CustomValue')) {
-                if ($null -eq $cv) { continue }
-                $val = Get-Prop $cv 'Value'
-                if ($null -ne $val) { $values[[int]$cv.Key] = [string]$val }
-            }
-            $index[$v.MoRef.Value] = [pscustomobject]@{
-                Type         = $t
-                Name         = $v.Name
-                MoRef        = $v.MoRef
-                InstanceUuid = if ($t -eq 'VirtualMachine') { Get-Prop $v 'Config.InstanceUuid' } else { $null }
-                BiosUuid     = if ($t -eq 'VirtualMachine') { Get-Prop $v 'Config.Uuid' } else { $null }
-                CustomValue  = $values
-            }
+            Write-Log "Could not read objects of type $t`: $(Get-ErrorDetail $_)" -Level WARNING
+        } finally {
+            if ($cvRef) { try { (Get-View -Server $viConn -Id $cvRef).DestroyView() } catch { } }
         }
     }
     Complete-Progress
@@ -1206,6 +1284,7 @@ if ($Mode -eq 'Export') {
                         # export. 100 tags per call.
                         try {
                             $ids = @($tagById.Keys | Where-Object { Test-InCategory $tagById[$_].Category.Name })
+                            Write-Log "Reading tag assignments of $($ids.Count) tag(s) through the tagging API ..."
                             for ($i = 0; $i -lt $ids.Count; $i += 100) {
                                 $chunk = @($ids[$i..([Math]::Min($i + 100, $ids.Count) - 1)])
                                 Show-Progress -Activity 'Reading tag assignments (tagging API)' -Index ($i + 1) -Total $ids.Count -Item "tags $($i + 1) to $($i + $chunk.Count)"
@@ -1226,7 +1305,9 @@ if ($Mode -eq 'Export') {
                         # Batches of 200; a batch that fails is read one object at a time.
                         $refs = @($selected.Values | ForEach-Object { $_.MoRef })
                         $batchSize = 200
+                        Write-Log "Reading tag assignments of $($refs.Count) object(s), per object ..."
                         for ($i = 0; $i -lt $refs.Count; $i += $batchSize) {
+                            if ($i -gt 0 -and $i % 1000 -eq 0) { Write-Log "  $i of $($refs.Count) objects read ..." }
                             Show-Progress -Activity 'Reading tag assignments' -Index ($i + 1) -Total $refs.Count -Item "objects $($i + 1) to $([Math]::Min($i + $batchSize, $refs.Count))"
                             $batch = @($refs[$i..([Math]::Min($i + $batchSize, $refs.Count) - 1)])
                             try {
@@ -1642,10 +1723,18 @@ if ($Mode -eq 'Import') {
                     }
                     $viObjects = @{}
                     if ($tagTargets.Count -gt 0) {
-                        foreach ($o in @(Get-VIObjectByVIView -Server $viConn -MORef @($tagTargets.Values | ForEach-Object { $_.MoRef }))) {
-                            $id = Split-EntityId "$($o.Id)"
-                            if ($id) { $viObjects[$id.Value] = $o }
+                        # PowerCLI objects are only needed to assign tags (and for the
+                        # per-object fallback): a dry run through the tagging API skips
+                        # this step, which took 72 s for 2500 objects in the lab (#11).
+                        # Log lines per step: no progress bar shows in some consoles.
+                        $loadViObjects = {
+                            Write-Log "Loading $($tagTargets.Count) object(s) with tag assignments ..."
+                            foreach ($o in @(Get-VIObjectByVIView -Server $viConn -MORef @($tagTargets.Values | ForEach-Object { $_.MoRef }))) {
+                                $id = Split-EntityId "$($o.Id)"
+                                if ($id) { $viObjects[$id.Value] = $o }
+                            }
                         }
+                        if (-not $DryRun -or -not $tagAssoc) { . $loadViObjects }
                         # Real tags only, matched by id (#4): a cluster's vSphere Zone comes
                         # back as an association without name or category
                         $tagById = @{}
@@ -1658,6 +1747,7 @@ if ($Mode -eq 'Import') {
                         if ($tagAssoc) {
                             try {
                                 $targets = @($tagTargets.Values)
+                                Write-Log "Reading the current tags of $($targets.Count) object(s) through the tagging API ..."
                                 for ($i = 0; $i -lt $targets.Count; $i += 500) {
                                     $chunk = @($targets[$i..([Math]::Min($i + 500, $targets.Count) - 1)])
                                     Show-Progress -Activity 'Reading the current tags (tagging API)' -Index ($i + 1) -Total $targets.Count -Item "objects $($i + 1) to $($i + $chunk.Count)"
@@ -1677,6 +1767,7 @@ if ($Mode -eq 'Import') {
                             Complete-Progress
                         }
                         if (-not $viaApi) {
+                            if ($viObjects.Count -eq 0) { . $loadViObjects }
                             foreach ($a in @(Get-TagAssignment -Server $viConn -Entity @($viObjects.Values))) {
                                 $current.Add([pscustomobject]@{ TagId = "$($a.Tag.Id)"; EntityId = "$($a.Entity.Id)" })
                             }
@@ -1691,8 +1782,10 @@ if ($Mode -eq 'Import') {
                     }
 
                     $no = 0
+                    if ($tagEntries.Count -gt 0) { Write-Log "Checking $($tagEntries.Count) tag assignment(s) ..." }
                     foreach ($ta in $tagEntries) {
                         $no++
+                        if ($no % 2000 -eq 0) { Write-Log "  $no of $($tagEntries.Count) tag assignment(s) checked ..." }
                         Show-Progress -Activity 'Tag assignments' -Index $no -Total $tagEntries.Count -Item "$($ta.Category)/$($ta.Tag) on $($ta.Entity.Name)"
                         $e = Resolve-Entity $ta.Entity
                         if (-not $e) { $s.TagNoObj++; continue }
@@ -1742,8 +1835,10 @@ if ($Mode -eq 'Import') {
                     }
 
                     $no = 0
+                    if ($valEntries.Count -gt 0) { Write-Log "Checking $($valEntries.Count) attribute value(s) ..." }
                     foreach ($av in $valEntries) {
                         $no++
+                        if ($no % 2000 -eq 0) { Write-Log "  $no of $($valEntries.Count) attribute value(s) checked ..." }
                         Show-Progress -Activity 'Custom attribute values' -Index $no -Total $valEntries.Count -Item "$($av.Attribute) on $($av.Entity.Name)"
                         $e = Resolve-Entity $av.Entity
                         if (-not $e) { $s.ValNoObj++; continue }

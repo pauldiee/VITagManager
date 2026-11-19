@@ -175,6 +175,9 @@ CHANGELOG
           objects; the root folder 'Datacenters' included, like 1.2.0)
         - tests/New-VITagScaleSet.ps1: a large folder/tag set for scale
           tests (default 2500 folders, 10000 tag assignments)
+        - The log file is written through one open writer, flushed per
+          line, instead of Add-Content per line (2.5 ms each; as in
+          VIFolderManager 1.5.1)
 
     v1.2.0  2026-11-18  Paul van Dieen
         - Tag assignments are read through vCenter's tagging API
@@ -429,6 +432,8 @@ if (-not (Test-Path -Path $LogDirectory)) {
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $LogFile   = Join-Path $LogDirectory "VITagManager_$timestamp.log"
 
+$script:LogWriter = $null
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -441,7 +446,17 @@ function Write-Log {
     )
     $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $entry = "[$ts] [$Level] $Message"
-    Add-Content -Path $LogFile -Value $entry
+    # One open writer for the whole run, flushed per line (#11): Add-Content
+    # opens the file for every line, 2.5 ms each (7 s for 3000 lines).
+    # Shared for reading and deleting, so the file can be tailed or removed
+    # while a session still holds it.
+    if ($null -eq $script:LogWriter) {
+        $fs = [System.IO.FileStream]::new($LogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        $script:LogWriter = [System.IO.StreamWriter]::new($fs, [System.Text.UTF8Encoding]::new($false))
+        $script:LogWriter.AutoFlush = $true
+    }
+    $script:LogWriter.WriteLine($entry)
     if ($FileOnly) { return }
     switch ($Level) {
         'SUCCESS' { Write-Host "  $entry" -ForegroundColor Green  }
@@ -1899,7 +1914,9 @@ Disconnect-VIServer -Server $viConn -Confirm:$false
 if ($script:RunFailures.Count -gt 0) {
     Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
     Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    $script:LogWriter.Dispose()
     exit 1
 }
 Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+$script:LogWriter.Dispose()

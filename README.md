@@ -4,7 +4,7 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 1.2.1 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.3.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
 > **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) and the 1.0.0 fix on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
@@ -137,10 +137,19 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-OverwriteValues` | Import: replace attribute values that differ on the target |
 | `-FilePath` | Import: the export file to import, instead of the menu. A path or a name, wildcards allowed (a bare name is also looked up in the backup directory); the newest match wins |
 | `-Force` | Import: no confirmation question (scripted runs; try `-DryRun` first) |
+| `-Report` | Export: also write an HTML report next to the JSON (see Visual report) |
 | `-DryRun` | Import: show what would change, change nothing |
 | `-CredentialPath` | Default: `<vCenterServer>.cred` next to the script |
 | `-ResetCredentials` | Prompt for new credentials |
 | `-SkipCertificateValidation` | Accept self-signed certificates (lab use) |
+
+## Visual report
+
+Add `-Report` to an export to get an HTML file next to the JSON (same name, `.html`). It shows what the export holds: the tag categories with their tags, the custom attributes, and per object its tags and attribute values. It's the [VI Export Viewer](https://github.com/pauldiee/VIExportViewer) (`report/viewer.html`) with the export embedded: one file that opens offline in any browser, loads nothing from the internet and uploads nothing. **Print / PDF** gives a clean printout for the migration file. The look follows the ITQ house style, without logos.
+
+Drop a second export on the open report (for example the same export from the target vCenter) and switch to **Compare**: every item is marked as missing on the target, different, only on the target, or the same. The older export is the source; **Swap** turns it round.
+
+The report holds the full export, names included. Keep it where you keep the export files; `Backups/` is git-ignored.
 
 ## Testing in a lab
 

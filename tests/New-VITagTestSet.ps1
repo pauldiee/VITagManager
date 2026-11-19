@@ -69,10 +69,10 @@
     Skip TLS certificate validation (self-signed lab certificates).
 
 .EXAMPLE
-    .\New-VITagTestSet.ps1 -vCenterServer 192.168.2.65 -Mode Create -Role Source -FoldersOnly
+    .\New-VITagTestSet.ps1 -vCenterServer vc-old.lab.local -Mode Create -Role Source -FoldersOnly
 
 .EXAMPLE
-    .\New-VITagTestSet.ps1 -vCenterServer vc-mgmt-a.site-a.vcf.lab -Mode Arrange -Role Target -UuidFrom ..\Backups\Tags_vc-mgmt-a.site-a.vcf.two_Assignments_<timestamp>.json
+    .\New-VITagTestSet.ps1 -vCenterServer vc-new.lab.local -Mode Arrange -Role Target -UuidFrom ..\Backups\Tags_vc-old.lab.local_Assignments_<timestamp>.json
 
 .NOTES
     Script   : New-VITagTestSet.ps1

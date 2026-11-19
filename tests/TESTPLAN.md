@@ -26,9 +26,9 @@ run (`Connect-VIServer` and `.Version`, `.Build`); labs get redeployed.
 
 | Code | Lab | vCenter | Hosts | Role in these tests |
 |---|---|---|---|---|
-| **L8** | Home, Workstation | `192.168.2.65`, 8.0 U3k | **none** | Source (vSphere 8). Definitions, and assignments on folders and the datacenter only: no VMs possible |
-| **LA** | Holodeck lab A | `vc-mgmt-a.site-a.vcf.lab`, 9.1.1 | yes | Main target. Twin VMs for the wave tests |
-| **LB** | Holodeck lab B | `vc-mgmt-a.site-a.vcf.two`, 9.0.2.0 build 25148086 (checked 2026-11-16) | yes (4) | Source with VMs for the wave tests (9.0.2 to 9.1.1) |
+| **L8** | Home, Workstation | vCenter 8.0 U3k | **none** | Source (vSphere 8). Definitions, and assignments on folders and the datacenter only: no VMs possible |
+| **LA** | Holodeck lab A | vCenter 9.1.1 | yes | Main target. Twin VMs for the wave tests |
+| **LB** | Holodeck lab B | vCenter 9.0.2.0 build 25148086 (checked 2026-11-16) | yes (4) | Source with VMs for the wave tests (9.0.2 to 9.1.1) |
 
 No real migration is needed: a "wave" is simulated by a dummy VM with the
 same name on source and target. The source copy carries the tags and
@@ -75,6 +75,22 @@ note.
 
 VMs as in VIFolderManager: no disk, no NIC, never powered on.
 
+### Scale set
+
+`tests/New-VITagScaleSet.ps1` builds a large set for testing progress and
+duration (#11): a VM folder `VITM-S` with `-FolderCount` empty child folders
+(default 2500), four categories `VITM-S-Env`/`-App`/`-Owner`/`-Tier` (39
+tags), one tag of each on every folder (10000 assignments, attached in bulk
+through the tagging API) and a value of the global attribute `VITM-S-Note`
+on every second folder. Create takes about 3 minutes on LA; running it again
+adds what is missing. `-Mode Remove` deletes the `VITM-S` tree, every
+`VITM-S*` category and attribute.
+
+Run on LA on 2026-11-19 (1.2.1, #11): export of 2608 objects and 10007 tag
+assignments in about 8 s, identical to 1.2.0; import `-DryRun` of the same
+file in 9 s (1:30 in 1.2.0), everything "already present". Removed again
+the same day.
+
 ## Test cases
 
 Expected results are what v0.1.0 is written to do. "Compare" means: list the
@@ -87,7 +103,7 @@ eye or with `Compare-Object`.
 | ID | Lab | Steps | Expected | Result |
 |---|---|---|---|---|
 | T01 | laptop | `pwsh -NoProfile`, `Get-Help .\Invoke-VITagManager.ps1 -Full` | Help shows all parameters and examples | 2026-11-16 (run by Claude): **fail**. `Get-Help` shows only the syntax: PowerShell ignores the whole help block. Two causes, both reproduced on copies: (1) `<#` directly under `#Requires` (needs a blank line in between); (2) the non-standard keywords `.CHANGELOG` and `.CREDIT`. Only with both fixed does help work (16 parameters). VIFolderManager has the same problem (blank line + no `.CHANGELOG` fixes it); about 95 scripts in 7 repos start with `#Requires` directly followed by `<#`. Fixed the same day: blank line after `#Requires`, changelog in a separate `<# CHANGELOG ... #>` block after the help block, credit in `.NOTES`. Retest (Claude): **pass**, `Get-Help -Full` shows all 16 parameters with text and the 4 examples; test set script 8 of 8 and 2 examples |
-| T02 | L8 | First run without `creds\` | Prompts, writes `creds\192.168.2.65.cred`; next run loads it; `-ResetCredentials` prompts again | 2026-11-16, first half: **pass**. A new `-CredentialPath creds/vifm-test-lab-a.cred` prompted for username and password and saved the file. Second half (`VITagManager_2026-11-16_22-22-06.log`): **pass**. `-ResetCredentials` prompted again although the file existed and rewrote it (22:22); the export as `vifm-test` (Read-only) worked |
+| T02 | L8 | First run without `creds\` | Prompts, writes `creds\<vcenter>.cred`; next run loads it; `-ResetCredentials` prompts again | 2026-11-16, first half: **pass**. A new `-CredentialPath creds/vifm-test-lab-a.cred` prompted for username and password and saved the file. Second half (`VITagManager_2026-11-16_22-22-06.log`): **pass**. `-ResetCredentials` prompted again although the file existed and rewrote it (22:22); the export as `vifm-test` (Read-only) worked |
 | T03 | L8 | Run without `-Mode` / `-Content`, try `cancel`, `all`, `1,2` | Menus as in VIFolderManager; cancel exits cleanly and disconnects | 2026-11-16 (screenshot, `VITagManager_2026-11-16_22-22-41.log`): **pass**. Mode menu, then the file menu (newest first, `[newest]` marked, 11 files); `all` at the single-choice file menu was refused ("Enter a number between 1 and 11"), `cancel` ended cleanly with a disconnect. Cancel at the first menu not shown; it exits before the log starts, by design |
 | T04 | L8 | `-Mode Export -DryRun -OverwriteValues` | Warning that both only apply to Import; export runs | 2026-11-16 (Claude): **pass**. Export with `-DryRun -OverwriteValues -FilePath -Force`: one warning that these only apply to Import; export ran normally. Log `VITagManager_2026-11-16_21-26-05.log` |
 

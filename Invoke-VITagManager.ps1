@@ -152,7 +152,7 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.3.0
+    Version  : 1.3.1
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -169,6 +169,24 @@
 
 <#
 CHANGELOG
+    v1.3.1  2026-11-25  Paul van Dieen
+        - Hard timeout on the tagging API (#15): at a customer an import of
+          Assignments (10 objects, greenfield vCenter 9.1.1) stopped on
+          "Reading the current tags ... through the tagging API" for more
+          than 10 minutes, in 1.2.0 and 1.3.0, and Ctrl+C had no effect.
+          Every tagging-API call now runs in a thread job and gets 120 s,
+          with a log line every 30 s while it waits; after that the tags are
+          read per object (the existing fallback, yellow line in the log).
+          A hanging call can't be stopped: started with pwsh -File or
+          -Command the script ends its PowerShell process at the end; in an
+          open console it returns to the prompt and says to close the window
+        - Import passes the object ids as plain hashtables instead of
+          building them through .Help (same result, no metadata lookup)
+        - Lab-verified 2026-11-25 on vCenter 9.0.2: export and dry-run import
+          through the API as before, and with a simulated hanging call
+          (40 s timeout): fallback per object with the same result, the
+          process ends; in an open console back to the prompt
+
     v1.3.0  2026-11-19  Paul van Dieen
         - -Report: an HTML report next to the export (VI Export Viewer 0.2.0
           with the export embedded, report\viewer.html): overview, compare
@@ -370,7 +388,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.3.0'
+$scriptVersion = '1.3.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1062,6 +1080,40 @@ if ($Mode -eq 'Export' -or $Mode -eq 'Import') {
     }
 }
 
+# Every tagging-API call runs in a thread job with a hard timeout (#15). At a
+# customer the call for 10 objects never returned (more than 10 minutes, on
+# a greenfield vCenter 9.1.1; 0.6 s in the lab): PowerCLI's own web timeout
+# did not end it and Ctrl+C had no effect. After the timeout the caller
+# reads per object instead. A hanging call can't be stopped, so its thread
+# is left behind; the end of the script deals with that.
+$TaggingApiTimeoutSec   = 120
+$script:TaggingApiStuck = $false
+function Invoke-TaggingApi {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)]$Argument
+    )
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        return , @($tagAssoc.$Method($Argument))   # no thread jobs: call directly, as before
+    }
+    $job = Start-ThreadJob -ScriptBlock { param($svc, $m, $arg) , @($svc.$m($arg)) } -ArgumentList $tagAssoc, $Method, $Argument
+    $started = [DateTime]::UtcNow
+    while ($true) {
+        $left = $TaggingApiTimeoutSec - [int]([DateTime]::UtcNow - $started).TotalSeconds
+        if ($left -le 0) { break }
+        if (Wait-Job -Job $job -Timeout ([Math]::Min(30, $left))) { break }
+        $waited = [int]([DateTime]::UtcNow - $started).TotalSeconds
+        if ($waited -lt $TaggingApiTimeoutSec) { Write-Log "  Still waiting for the tagging API ($waited of $TaggingApiTimeoutSec s) ..." }
+    }
+    if ($job.State -in 'Completed', 'Failed', 'Stopped') {
+        try { return , @(Receive-Job -Job $job -ErrorAction Stop | ForEach-Object { $_ }) }
+        finally { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+    # Still running: leave the thread behind (Stop-Job would hang on it too)
+    $script:TaggingApiStuck = $true
+    throw "no answer from the tagging API within $TaggingApiTimeoutSec s ($Method)"
+}
+
 # --- vCenter Helper Functions ---------------------------------------------------
 $serviceInstance = Get-View -Server $viConn ServiceInstance
 $fieldManager    = Get-View -Server $viConn -Id $serviceInstance.Content.CustomFieldsManager
@@ -1354,7 +1406,7 @@ if ($Mode -eq 'Export') {
                             for ($i = 0; $i -lt $ids.Count; $i += 100) {
                                 $chunk = @($ids[$i..([Math]::Min($i + 100, $ids.Count) - 1)])
                                 Show-Progress -Activity 'Reading tag assignments (tagging API)' -Index ($i + 1) -Total $ids.Count -Item "tags $($i + 1) to $($i + $chunk.Count)"
-                                foreach ($r in @($tagAssoc.list_attached_objects_on_tags($chunk))) {
+                                foreach ($r in @(Invoke-TaggingApi -Method 'list_attached_objects_on_tags' -Argument $chunk)) {
                                     foreach ($o in @($r.object_ids)) { $assoc.Add([pscustomobject]@{ TagId = "$($r.tag_id)"; EntityId = "$($o.type)-$($o.id)" }) }
                                 }
                             }
@@ -1818,11 +1870,10 @@ if ($Mode -eq 'Import') {
                                 for ($i = 0; $i -lt $targets.Count; $i += 500) {
                                     $chunk = @($targets[$i..([Math]::Min($i + 500, $targets.Count) - 1)])
                                     Show-Progress -Activity 'Reading the current tags (tagging API)' -Index ($i + 1) -Total $targets.Count -Item "objects $($i + 1) to $($i + $chunk.Count)"
-                                    $objIds = foreach ($t in $chunk) {
-                                        $d = $tagAssoc.Help.list_attached_tags_on_objects.object_ids.Element.Create()
-                                        $d.type = $t.MoRef.Type; $d.id = $t.MoRef.Value; $d
-                                    }
-                                    foreach ($r in @($tagAssoc.list_attached_tags_on_objects(@($objIds)))) {
+                                    # Plain hashtables, not .Help...Element.Create(): same
+                                    # result in the lab, and no metadata lookup (#15)
+                                    $objIds = @(foreach ($t in $chunk) { @{ type = $t.MoRef.Type; id = $t.MoRef.Value } })
+                                    foreach ($r in @(Invoke-TaggingApi -Method 'list_attached_tags_on_objects' -Argument $objIds)) {
                                         foreach ($tid in @($r.tag_ids)) { $current.Add([pscustomobject]@{ TagId = "$tid"; EntityId = "$($r.object_id.type)-$($r.object_id.id)" }) }
                                     }
                                 }
@@ -1961,14 +2012,31 @@ if ($Mode -eq 'Import') {
 # DISCONNECT
 # =============================================================================
 Write-Log 'Disconnecting from vCenter...'
-if ($cisConn) { Disconnect-CisServer -Server $cisConn -Confirm:$false -ErrorAction SilentlyContinue }
+# A tagging-API call that hung (#15) still holds the CIS connection: leave it,
+# the session ends on vCenter by itself
+if ($cisConn -and -not $script:TaggingApiStuck) { Disconnect-CisServer -Server $cisConn -Confirm:$false -ErrorAction SilentlyContinue }
 Disconnect-VIServer -Server $viConn -Confirm:$false
+$exitCode = 0
 if ($script:RunFailures.Count -gt 0) {
     Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
-    Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
-    $script:LogWriter.Dispose()
-    exit 1
+    $exitCode = 1
+} else {
+    Write-Log '===== Script finished =====' -Level SUCCESS
 }
-Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+if ($script:TaggingApiStuck) {
+    # The hanging thread keeps a pwsh process from closing. Started for this
+    # script only (pwsh -File / -Command): end the process hard. In an open
+    # console: back to the prompt, and say so.
+    $leaf = Split-Path -Path $PSCommandPath -Leaf
+    $ownProcess = @([Environment]::GetCommandLineArgs() | Where-Object { $_ -like "*$leaf*" }).Count -gt 0
+    if ($ownProcess) {
+        Write-Log 'A tagging-API call is still hanging; ending the PowerShell process.' -Level WARNING
+        $script:LogWriter.Dispose()
+        [Console]::Out.Flush()
+        [Environment]::Exit($exitCode)
+    }
+    Write-Log 'A tagging-API call is still hanging in this PowerShell session. Close this window when you are done; exit may hang.' -Level WARNING
+}
 $script:LogWriter.Dispose()
+if ($exitCode -ne 0) { exit $exitCode }

@@ -4,7 +4,7 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 1.3.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.3.1 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 
 > **Status: lab-tested.** Version 0.1.0 has been lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`); the 0.2.0 changes (prompts, failure summary, exit codes) and the 1.0.0 fix on VCF 9.1.1 with exports and dry runs. It has not been used in a production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
@@ -67,6 +67,8 @@ Assignments cover VMs and templates, hosts, clusters, standalone hosts, datacent
 **Reading the inventory (1.2.1).** The objects of each type (with their names, custom attribute values and, for VMs, UUIDs) are read through vCenter's PropertyCollector in pages, so even a large vCenter shows progress while it reads; in the lab 2608 objects took 8 seconds (#11).
 
 **Fallback.** If the tagging API is not available, the log says so in yellow and the tags are read per object as in 1.0.0 and 1.1.0, 200 objects per call. Reading all tag assignments of a vCenter with `Get-TagAssignment` without `-Entity` is never used: it stops on the first tag on an object PowerCLI can't load (field report on vCenter 8.0.3: *"The object 'vim.vslm.host.VStorageObjectManager:vstorageObjectManager' has already been deleted or has not been completely created"*, #4). If a call of 200 objects fails, they are read one at a time. An object that disappeared in the meantime (seen: a Kubernetes control-plane VM that the Supervisor replaced) is a yellow skip; any other object whose tags can't be read is a red `FAILED read tags` line. The export is written either way.
+
+**Timeout on the tagging API (1.3.1).** Every call to the tagging API gets 120 seconds; while it waits, the log says so every 30 seconds. With no answer by then, the log says so in yellow and the tags are read per object, as in the fallback above (#15). The reason: at a customer an import into a greenfield vCenter 9.1.1 stopped on that call for more than 10 minutes, with 10 objects, and Ctrl+C had no effect (the same call takes under a second in the lab). A call that hangs can't be stopped, so it keeps running in the background. Started with `pwsh -File` or `pwsh -Command`, the script ends its PowerShell process when it's done. Run from an open console, it returns to the prompt with a yellow line: close that window when you're done, because `exit` may hang on the call.
 
 For VMs the export also records the instance UUID and BIOS UUID; they are only used on import to tell apart VMs with the same name.
 

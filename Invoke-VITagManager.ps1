@@ -152,14 +152,17 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.3.1
+    Version  : 1.4.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : Lab, 2026-11-16: vCenter 8.0.3 to VCF 9.1.1 and VCF 9.0.2 to
                9.1.1 (definitions, folder and VM wave assignments); see
                tests/TESTPLAN.md. Lab, 2026-11-19: VCF 9.1.1 with 2608
-               objects and 10007 tag assignments (tests/New-VITagScaleSet.ps1)
+               objects and 10007 tag assignments (tests/New-VITagScaleSet.ps1).
+               Lab B, 2026-11-25: VCF 9.0.2, 1.4.0 through the associations
+               API and through the CIS fallback, export (all and a VM wave)
+               identical to 1.3.0, import -DryRun identical on both routes
     Credit   : The split between definitions (carried over once) and assignments
                (captured per wave, right before the move) follows Jim Millard,
                "Migrating tags after cross-vCenter vMotion" (Copy-vcTags.ps1 and
@@ -169,6 +172,28 @@
 
 <#
 CHANGELOG
+    v1.4.0  2026-11-25  Paul van Dieen
+        - Tag assignments are read through vCenter's tagging associations API
+          first (#15): GET /api/vcenter/tagging/associations returns every
+          association of the vCenter, paged; one pass per run, plain REST
+          with its own session and the same 120 s timeout per call. Export
+          keeps the objects in scope, Import the objects involved. The API
+          is documented for vSphere 7.0 U3, 8.0 and 8.0.3. Field test at a
+          customer (9.1.1): 0.13 s, where the CIS call
+          list-attached-tags-on-objects took 8 s for one VM and hung for 10
+        - Fallback order: associations API, then the CIS tagging API (as in
+          1.3.1, with its timeout), then per object. The associations API is
+          skipped when none of its tag ids matches a known tag
+        - Fix: 1.3.1 read nothing through the CIS tagging API. Its timeout
+          wrapper returned the results as one wrapped list, so every tag id
+          became all ids joined: an Export through that API wrote 0 tag
+          assignments without a warning, and an Import didn't see the tags
+          already present (found on lab B, VCF 9.0.2: 1.3.0 exported 14,
+          1.3.1 exported 0)
+        - The REST calls check the vCenter certificate; with an untrusted
+          certificate use -SkipCertificateValidation (the log says so), or
+          the script falls back to the CIS tagging API
+
     v1.3.1  2026-11-25  Paul van Dieen
         - Hard timeout on the tagging API (#15): at a customer an import of
           Assignments (10 objects, greenfield vCenter 9.1.1) stopped on
@@ -388,7 +413,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.3.1'
+$scriptVersion = '1.4.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1094,7 +1119,10 @@ function Invoke-TaggingApi {
         [Parameter(Mandatory = $true)]$Argument
     )
     if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
-        return , @($tagAssoc.$Method($Argument))   # no thread jobs: call directly, as before
+        # No leading comma on these returns: the callers wrap the result in @(),
+        # and ', @(...)' made that one item holding the whole list, so every
+        # $r.tag_id became all ids joined (1.3.1 exported 0 assignments)
+        return @($tagAssoc.$Method($Argument))   # no thread jobs: call directly, as before
     }
     $job = Start-ThreadJob -ScriptBlock { param($svc, $m, $arg) , @($svc.$m($arg)) } -ArgumentList $tagAssoc, $Method, $Argument
     $started = [DateTime]::UtcNow
@@ -1106,12 +1134,98 @@ function Invoke-TaggingApi {
         if ($waited -lt $TaggingApiTimeoutSec) { Write-Log "  Still waiting for the tagging API ($waited of $TaggingApiTimeoutSec s) ..." }
     }
     if ($job.State -in 'Completed', 'Failed', 'Stopped') {
-        try { return , @(Receive-Job -Job $job -ErrorAction Stop | ForEach-Object { $_ }) }
+        try { return @(Receive-Job -Job $job -ErrorAction Stop | ForEach-Object { $_ }) }
         finally { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
     }
     # Still running: leave the thread behind (Stop-Job would hang on it too)
     $script:TaggingApiStuck = $true
     throw "no answer from the tagging API within $TaggingApiTimeoutSec s ($Method)"
+}
+
+# --- vCenter tagging associations API (#15) ------------------------------------
+# GET /api/vcenter/tagging/associations (vSphere Automation API, documented for
+# 7.0 U3, 8.0 and 8.0.3): every tag association in the vCenter, paged with a
+# marker. At a customer (9.1.1) it answered in 0.13 s, where the CIS call
+# list-attached-tags-on-objects took 8 s for one VM and hung for 10 objects.
+# Plain REST with its own session and a hard timeout; tried first, then the
+# CIS calls above, then per object.
+$script:RestSessionId   = $null
+$script:AllAssociations = $null
+$restTlsArgs = @{}
+if ($SkipCertificateValidation) { $restTlsArgs['SkipCertificateCheck'] = $true }
+
+function Open-VcRestSession {
+    $user = $credential.UserName
+    $pass = $credential.GetNetworkCredential().Password
+    $pair = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${user}:${pass}"))
+    $sid  = Invoke-RestMethod -Method Post -Uri "https://${vCenterServer}/api/session" -Headers @{ Authorization = "Basic $pair" } `
+        -TimeoutSec $TaggingApiTimeoutSec @restTlsArgs
+    if ($sid -isnot [string] -or -not $sid) { throw 'no session id from /api/session' }
+    $script:RestSessionId = $sid
+}
+
+function Close-VcRestSession {
+    if (-not $script:RestSessionId) { return }
+    try {
+        $null = Invoke-RestMethod -Method Delete -Uri "https://${vCenterServer}/api/session" `
+            -Headers @{ 'vmware-api-session-id' = $script:RestSessionId } -TimeoutSec 30 @restTlsArgs
+    } catch { }
+    $script:RestSessionId = $null
+}
+
+function Get-AllTagAssociations {
+    # Every association as TagId + EntityId ('VirtualMachine-vm-42'), read once
+    # per run. Pages are followed while the status is READY and the marker moves.
+    if ($null -ne $script:AllAssociations) { return $script:AllAssociations }
+    if (-not $script:RestSessionId) { Open-VcRestSession }
+    $list    = [System.Collections.Generic.List[object]]::new()
+    $marker  = ''
+    $page    = 0
+    $renewed = $false
+    while ($true) {
+        $uri = "https://${vCenterServer}/api/vcenter/tagging/associations"
+        if ($marker) { $uri += '?marker=' + [Uri]::EscapeDataString($marker) }
+        try {
+            $r = Invoke-RestMethod -Uri $uri -Headers @{ 'vmware-api-session-id' = $script:RestSessionId } `
+                -TimeoutSec $TaggingApiTimeoutSec @restTlsArgs
+        } catch {
+            # A session that expired during a long run: log in again, once
+            $code = try { [int]$_.Exception.Response.StatusCode } catch { 0 }
+            if ($code -eq 401 -and -not $renewed) { $renewed = $true; Open-VcRestSession; continue }
+            throw
+        }
+        $page++
+        foreach ($a in @($r.associations)) {
+            if ($null -eq $a -or $null -eq $a.object) { continue }
+            $list.Add([pscustomobject]@{ TagId = "$($a.tag)"; EntityId = "$($a.object.type)-$($a.object.id)" })
+        }
+        if ($page % 10 -eq 0) { Write-Log "  $($list.Count) association(s) read ($page pages) ..." }
+        $next = "$($r.marker)"
+        if ("$($r.status)" -ne 'READY' -or -not $next -or $next -eq $marker) { break }
+        $marker = $next
+    }
+    $script:AllAssociations = $list.ToArray()
+    return $script:AllAssociations
+}
+
+function Test-AssociationsUsable {
+    # The associations must use the same tag ids as Get-Tag; if none of them
+    # matches a known tag, something differs and the CIS route is safer.
+    param([object[]]$Associations, [hashtable]$TagById)
+    if ($Associations.Count -eq 0 -or $TagById.Count -eq 0) { return $true }
+    return @($Associations | Where-Object { $TagById.ContainsKey($_.TagId) }).Count -gt 0
+}
+
+if ($Mode -eq 'Export' -or $Mode -eq 'Import') {
+    try {
+        Open-VcRestSession
+        Write-Log 'Tagging associations API connected: tag assignments are read in one pass.'
+    } catch {
+        $why  = Get-FailReason $_
+        $hint = if ("$($_.Exception)" -match 'SSL|certificate|TLS|RemoteCertificate') { ' The vCenter certificate is not trusted by this host: trust it, or use -SkipCertificateValidation.' } else { '' }
+        Write-Log "Tagging associations API not available ($why); using the CIS tagging API instead.$hint" -Level WARNING
+        $script:RestSessionId = $null
+    }
 }
 
 # --- vCenter Helper Functions ---------------------------------------------------
@@ -1395,7 +1509,23 @@ if ($Mode -eq 'Export') {
                     # Each association as TagId + EntityId ('VirtualMachine-vm-42')
                     $assoc = [System.Collections.Generic.List[object]]::new()
                     $viaApi = $false
-                    if ($tagAssoc) {
+                    if ($script:RestSessionId) {
+                        # Associations API (#15): every association in one pass
+                        try {
+                            Write-Log 'Reading all tag assignments through the tagging associations API ...'
+                            $all = @(Get-AllTagAssociations)
+                            if (-not (Test-AssociationsUsable -Associations $all -TagById $tagById)) {
+                                throw "none of the $($all.Count) association(s) matches a known tag id"
+                            }
+                            foreach ($a in $all) { $assoc.Add($a) }
+                            Write-Log "  $($all.Count) association(s) read."
+                            $viaApi = $true
+                        } catch {
+                            Write-Log "Reading through the tagging associations API failed ($(Get-FailReason $_)); using the CIS tagging API instead." -Level WARNING
+                            $assoc.Clear()
+                        }
+                    }
+                    if (-not $viaApi -and $tagAssoc) {
                         # vCenter's tagging API (#9): for a list of tags, every attached
                         # object id in one call. Nothing is resolved to a PowerCLI object,
                         # so an object that is gone or can't be loaded can't stop the
@@ -1853,7 +1983,7 @@ if ($Mode -eq 'Import') {
                                 if ($id) { $viObjects[$id.Value] = $o }
                             }
                         }
-                        if (-not $DryRun -or -not $tagAssoc) { . $loadViObjects }
+                        if (-not $DryRun -or -not ($script:RestSessionId -or $tagAssoc)) { . $loadViObjects }
                         # Real tags only, matched by id (#4): a cluster's vSphere Zone comes
                         # back as an association without name or category
                         $tagById = @{}
@@ -1863,7 +1993,27 @@ if ($Mode -eq 'Import') {
                         # when the API is not available or fails
                         $current = [System.Collections.Generic.List[object]]::new()
                         $viaApi = $false
-                        if ($tagAssoc) {
+                        if ($script:RestSessionId) {
+                            # Associations API (#15): all associations in one pass,
+                            # kept for the objects involved
+                            try {
+                                Write-Log "Reading the current tags of $($tagTargets.Count) object(s) through the tagging associations API ..."
+                                $all = @(Get-AllTagAssociations)
+                                if (-not (Test-AssociationsUsable -Associations $all -TagById $tagById)) {
+                                    throw "none of the $($all.Count) association(s) matches a known tag id"
+                                }
+                                foreach ($a in $all) {
+                                    $id = Split-EntityId $a.EntityId
+                                    if ($id -and $tagTargets.ContainsKey($id.Value)) { $current.Add($a) }
+                                }
+                                Write-Log "  $($all.Count) association(s) read, $($current.Count) on the objects involved."
+                                $viaApi = $true
+                            } catch {
+                                Write-Log "Reading the current tags through the tagging associations API failed ($(Get-FailReason $_)); using the CIS tagging API instead." -Level WARNING
+                                $current.Clear()
+                            }
+                        }
+                        if (-not $viaApi -and $tagAssoc) {
                             try {
                                 $targets = @($tagTargets.Values)
                                 Write-Log "Reading the current tags of $($targets.Count) object(s) through the tagging API ..."
@@ -2012,6 +2162,7 @@ if ($Mode -eq 'Import') {
 # DISCONNECT
 # =============================================================================
 Write-Log 'Disconnecting from vCenter...'
+Close-VcRestSession
 # A tagging-API call that hung (#15) still holds the CIS connection: leave it,
 # the session ends on vCenter by itself
 if ($cisConn -and -not $script:TaggingApiStuck) { Disconnect-CisServer -Server $cisConn -Confirm:$false -ErrorAction SilentlyContinue }

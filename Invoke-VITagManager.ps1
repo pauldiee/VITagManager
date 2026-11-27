@@ -41,7 +41,9 @@
     encrypted on Linux/macOS).
 
 .PARAMETER vCenterServer
-    FQDN or IP of the vCenter Server.
+    FQDN or IP of the vCenter Server. If omitted, the script asks for it and
+    lists the vCenters with a saved credential (<host>.cred next to the
+    script) as numbers.
 
 .PARAMETER Mode
     Export or Import. If omitted, an interactive menu is shown.
@@ -121,6 +123,9 @@
 
 .PARAMETER SkipCertificateValidation
     Skip TLS certificate validation. For lab use with self-signed certificates.
+    Without it, a vCenter whose certificate this machine doesn't trust is not
+    connected silently any more: the script asks whether to go on without
+    the check for this run (an unattended run stops with exit code 2).
 
 .EXAMPLE
     # Interactive - pick mode and content from menus
@@ -152,7 +157,7 @@
 
 .NOTES
     Script   : Invoke-VITagManager.ps1
-    Version  : 1.4.0
+    Version  : 1.5.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
@@ -172,6 +177,17 @@
 
 <#
 CHANGELOG
+    v1.5.0  2026-11-27  Paul van Dieen
+        - Start without -vCenterServer (W38, as nsx-segment-migration): the
+          script asks for the vCenter and lists the ones with a saved
+          credential (<host>.cred next to the script) as numbers; 'q' quits
+        - Untrusted vCenter certificate (#1, W20): no longer accepted silently
+          (PowerCLI's Warn). Without -SkipCertificateValidation the connection
+          fails on it and the script asks whether to go on without the check
+          for this run; an unattended run stops with exit code 2
+        - An unexpected error ends the run with one red [ERROR] line (also in
+          the log) and exit code 1, instead of PowerShell's error record
+
     v1.4.0  2026-11-25  Paul van Dieen
         - Tag assignments are read through vCenter's tagging associations API
           first (#15): GET /api/vcenter/tagging/associations returns every
@@ -356,8 +372,8 @@ CHANGELOG
 #>
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$vCenterServer,
+    [Parameter(Mandatory = $false)]
+    [string]$vCenterServer = '',
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('Export', 'Import')]
@@ -413,7 +429,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.4.0'
+$scriptVersion = '1.5.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -534,8 +550,10 @@ function Write-Log {
 # Errors nothing else catches end the script (StrictMode, -ErrorAction Stop);
 # record them in the log file too, not only on the console
 trap {
-    try { Write-Log "Stopped on an unexpected error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Level ERROR } catch { }
-    break
+    # One red line and exit code 1 instead of PowerShell's error record (W38)
+    try { Write-Log "Stopped on an unexpected error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Level ERROR } catch { Write-Host "  [ERROR] $($_.Exception.Message)" -ForegroundColor Red }
+    try { $script:LogWriter.Dispose() } catch { }
+    exit 1
 }
 
 # --- Run results (#2, as VDSPortGroupManager #20) ----------------------------------
@@ -884,6 +902,36 @@ function Select-Content {
     return @($choice | ForEach-Object { $_.Value })
 }
 
+# --- vCenter (W38) -------------------------------------------------------------
+# Without -vCenterServer: ask for it, with the vCenters that have a saved
+# credential (<host>.cred next to the script; file names only) as numbers.
+if (-not $vCenterServer) {
+    $savedVc = @(Get-ChildItem -LiteralPath $scriptDir -Filter '*.cred' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | ForEach-Object { $_.BaseName })
+    Write-Host "`n  vCenter Server" -ForegroundColor Cyan
+    if ($savedVc.Count -gt 0) {
+        Write-Host '  Saved credential for:' -ForegroundColor DarkGray
+        for ($i = 0; $i -lt $savedVc.Count; $i++) { Write-Host ("    [{0}] {1}" -f ($i + 1), $savedVc[$i]) }
+        Write-Host "  Type a number, or the FQDN or IP of another vCenter ('q' to quit)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Type the FQDN or IP of the vCenter ('q' to quit)." -ForegroundColor DarkGray
+    }
+    while (-not $vCenterServer) {
+        $answer = Read-Input '  vCenter'
+        if (-not $answer) { continue }
+        if (Test-CancelInput $answer) { Write-Host '  Cancelled.' -ForegroundColor Yellow; exit 0 }
+        if ($answer -match '^\d+$' -and $savedVc.Count -gt 0) {
+            $n = [int]$answer
+            if ($n -ge 1 -and $n -le $savedVc.Count) { $vCenterServer = $savedVc[$n - 1]; Write-Host "  [OK]   $vCenterServer" -ForegroundColor Green }
+            else { Write-Host "  Enter a number between 1 and $($savedVc.Count), or a name." -ForegroundColor Red }
+            continue
+        }
+        $answer = $answer -replace '^https?://', '' -replace '/+$', ''
+        if ($answer -match '\s') { Write-Host '  A name or IP has no spaces.' -ForegroundColor Red; continue }
+        $vCenterServer = $answer
+    }
+}
+
 # --- Interactive Mode Menu ------------------------------------------------------
 if (-not $Mode) {
     $modeOptions = @(
@@ -1076,15 +1124,33 @@ if ($categoryActive) { Write-Log "Category filter:  $($categoryPatterns -join ',
 Write-Log "System attributes: $(if ($IncludeSystemAttributes) { 'included' } else { 'skipped (use -IncludeSystemAttributes to include them)' })"
 
 Write-Log "Connecting to vCenter: $vCenterServer ..."
-try {
-    $null = Set-PowerCLIConfiguration `
-        -InvalidCertificateAction $(if ($SkipCertificateValidation) { 'Ignore' } else { 'Warn' }) `
-        -Confirm:$false -Scope Session -WarningAction SilentlyContinue
-    $viConn = Connect-VIServer -Server $vCenterServer -Credential $credential -ErrorAction Stop -WarningAction SilentlyContinue
-    Write-Log "Connected to $vCenterServer (version $($viConn.Version), build $($viConn.Build))." -Level SUCCESS
-} catch {
-    Write-Log "Failed to connect to vCenter '$vCenterServer': $_" -Level ERROR
-    exit 1
+# An untrusted certificate is no longer accepted silently (#1, W20): without
+# -SkipCertificateValidation PowerCLI fails on it, and the script asks whether
+# to go on without the check for this run.
+$certAction = if ($SkipCertificateValidation) { 'Ignore' } else { 'Fail' }
+$viConn = $null
+while (-not $viConn) {
+    try {
+        $null = Set-PowerCLIConfiguration -InvalidCertificateAction $certAction `
+            -Confirm:$false -Scope Session -WarningAction SilentlyContinue
+        $viConn = Connect-VIServer -Server $vCenterServer -Credential $credential -ErrorAction Stop -WarningAction SilentlyContinue
+        Write-Log "Connected to $vCenterServer (version $($viConn.Version), build $($viConn.Build))." -Level SUCCESS
+    } catch {
+        $reason = Get-FailReason $_
+        if ($certAction -eq 'Fail' -and $reason -match '(?i)certificate') {
+            Write-Log "The certificate of $vCenterServer is not trusted by this machine (self-signed, or its CA is not imported)." -Level WARNING
+            Write-Host '  Unattended runs: pass -SkipCertificateValidation, or trust the certificate.' -ForegroundColor DarkGray
+            $answer = Read-Input '  Continue without checking the certificate for this run? (y/N)'
+            if ($answer -match '^(y|yes|j|ja)$') {
+                $certAction = 'Ignore'
+                $SkipCertificateValidation = [switch]$true
+                Write-Log 'Certificate check off for this run. Next time add -SkipCertificateValidation.' -Level WARNING
+                continue
+            }
+        }
+        Write-Log "Failed to connect to vCenter '$vCenterServer': $reason" -Level ERROR
+        exit 1
+    }
 }
 
 # --- Tagging API (#9) -----------------------------------------------------------

@@ -177,6 +177,19 @@ VITM-T-NoSuchVM
 |---|---|---|---|---|
 | T50 | L8, LA, LB | `New-VITagTestSet.ps1 -Mode Remove` | All VITM-T objects gone; other test sets untouched. Remove anything a Definitions import copied from other sets (SPM-T-Tier on LA) by hand, or avoid it (see open points) | 2026-11-16 (Claude): **pass** on LA and LB. Both: template, 7 VMs (incl. both Dups) and the 5 VITM-T folders removed; LB also its 4 categories and 3 attributes (LA's went in T40). Check: a `-Category 'VITM-T*'` export of each finds 0 categories, 0 tags, 0 attributes. **L8 kept on purpose** (Paul): VITM-T categories, tags, attributes (incl. `VITM-T-Drift`) and folders. Still for Paul: remove the Read-only permission of `vifm-test` on the LA root (T43). `creds/vifm-test-lab-a.cred` deleted |
 
+**1.5.0 (W38, #1), 2026-11-27, lab B (vCenter 9.0.2, certificate not trusted by the laptop):** start without `-vCenterServer`, certificate question, error trap. Export of Definitions only (read-only); answers from stdin.
+
+| # | Steps | Result |
+|---|---|---|
+| V1 | No `-vCenterServer`; `1` at the vCenter list, `y` at the certificate question | **pass**: list `[1] vc-mgmt-a.site-a.vcf.two`, `[2] vc-mgmt-a.site-a.vcf.lab` (saved credentials, newest first); WARNING "The certificate of ... is not trusted ..."; "Certificate check off for this run"; connected (9.0.2), 1 category / 3 tags exported, exit 0 |
+| V2 | Same, `n` | **pass**: ERROR "Failed to connect ...: Error: Invalid server certificate ...", exit 1 |
+| V3 | `-vCenterServer` given, stdin closed (unattended) | **pass**: certificate warning, "[ERROR] No console input available ... Continue without checking the certificate ...", exit 2 |
+| V4 | `-SkipCertificateValidation`, stdin closed | **pass**: no question, connected, exit 0 |
+| V5 | `q` at the vCenter prompt | **pass**: "Cancelled.", exit 0 |
+| V6 | No `-vCenterServer`, stdin closed | **pass**: "No console input ... The script asked: vCenter", exit 2 |
+
+Not provoked: the error trap (one red [ERROR] line and exit 1 instead of the error record); no lab case found that reaches it.
+
 ## Order of a full run
 
 1. Check versions of L8, LA, LB; update `labs.md` if they changed.

@@ -4,11 +4,11 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VITagManager.ps1` | 1.4.0 | Export / import tags and custom attributes |
+| `Invoke-VITagManager.ps1` | 1.5.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
 | `tests/New-VITagScaleSet.ps1` | 0.1.1 | Builds and removes a large tag set in a **lab** vCenter, to test at scale (progress, duration) |
 
-> **Status: lab-tested, first field use.** The current version is 1.4.0. Lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`), at scale on VCF 9.1.1 (2608 objects, 10007 tag assignments), and 1.4.0 on VCF 9.0.2 through both the associations API and the CIS fallback (export and import `-DryRun`). At a customer it has read tag assignments on VCF 9.1.1 (the associations API in 1.4.0); it has not yet carried a complete production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
+> **Status: lab-tested, first field use.** The current version is 1.5.0. Lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`), at scale on VCF 9.1.1 (2608 objects, 10007 tag assignments), and 1.4.0 on VCF 9.0.2 through both the associations API and the CIS fallback (export and import `-DryRun`). At a customer it has read tag assignments on VCF 9.1.1 (the associations API in 1.4.0); it has not yet carried a complete production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
 
 ---
 
@@ -108,7 +108,10 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host: [Jump Host: PowerShell 
 ## Usage
 
 ```powershell
-# Fully interactive
+# Fully interactive: asks for the vCenter (saved ones as numbers), mode and content
+.\Invoke-VITagManager.ps1
+
+# Interactive, for one vCenter
 .\Invoke-VITagManager.ps1 -vCenterServer vc01.vcf.lab
 
 # Definitions: export from the source, preview and import on the target
@@ -140,7 +143,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 
 | Parameter | Description |
 |---|---|
-| `-vCenterServer` | FQDN or IP of the vCenter Server (required) |
+| `-vCenterServer` | FQDN or IP of the vCenter Server. Left out: the script asks for it and lists the vCenters with a saved credential as numbers (1.5.0) |
 | `-Mode` | `Export` or `Import`; menu when omitted |
 | `-Content` | `Definitions`, `Assignments` (one or both); menu when omitted |
 | `-VMName` | Limit Assignments to these VMs (wildcards allowed) |
@@ -156,7 +159,7 @@ From a scheduled task or another script, start it with `pwsh -Command` rather th
 | `-DryRun` | Import: show what would change, change nothing |
 | `-CredentialPath` | Default: `<vCenterServer>.cred` next to the script |
 | `-ResetCredentials` | Prompt for new credentials |
-| `-SkipCertificateValidation` | Accept self-signed certificates (lab use) |
+| `-SkipCertificateValidation` | Accept a certificate this machine does not trust (lab use). Without it, from 1.5.0 the script asks whether to go on without the check for this run; an unattended run stops with exit code 2 (before 1.5.0 such a vCenter was connected silently) |
 
 ## Visual report
 

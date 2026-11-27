@@ -11,6 +11,16 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 
 ---
 
+## Step-by-step guide
+
+VITagManager is steps 2 and 3 of carrying the vCenter configuration over to a new VCF 9 vCenter in a side-by-side migration, and it comes back in every migration wave, because a tag assignment doesn't follow a VM to another vCenter. The guide on docs.hollebollevsan.nl walks through it, with the commands and a check per step:
+
+- [Carrying over the vCenter configuration, step 2: tag categories and tags](https://docs.hollebollevsan.nl/docs/30-carry-over-vcenter-configuration/#step-2-tag-categories-and-tags): the definitions (categories, tags, custom attributes) go across once.
+- [Migrating without HCX, 1. Before](https://docs.hollebollevsan.nl/docs/32-migrating-without-hcx/#1-before) and [3. After](https://docs.hollebollevsan.nl/docs/32-migrating-without-hcx/#3-after): export the tag assignments of a wave before it moves, and apply them on the target after.
+- [Side-by-side migration: build new, then move the workloads](https://docs.hollebollevsan.nl/docs/29-side-by-side-migration/#toolkits): the whole route, and how this toolkit fits with the others.
+
+---
+
 ## How it works
 
 The script connects to a vCenter and runs one of two modes (`-Mode Export|Import`, or a menu). Each mode handles one or both kinds of content (`-Content Definitions,Assignments`, or a menu):

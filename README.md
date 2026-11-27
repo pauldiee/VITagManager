@@ -6,6 +6,7 @@ A PowerShell utility to export and import vSphere tags and custom attributes: th
 |---|---|---|
 | `Invoke-VITagManager.ps1` | 1.4.0 | Export / import tags and custom attributes |
 | `tests/New-VITagTestSet.ps1` | 0.1.0 | Builds, arranges and removes a throwaway test set in **lab** vCenters |
+| `tests/New-VITagScaleSet.ps1` | 0.1.1 | Builds and removes a large tag set in a **lab** vCenter, to test at scale (progress, duration) |
 
 > **Status: lab-tested, first field use.** The current version is 1.4.0. Lab-tested from vCenter 8.0.3 and VCF 9.0.2 into VCF 9.1.1 (definitions, folder assignments, a VM wave; results in `tests/TESTPLAN.md`), at scale on VCF 9.1.1 (2608 objects, 10007 tag assignments), and 1.4.0 on VCF 9.0.2 through both the associations API and the CIS fallback (export and import `-DryRun`). At a customer it has read tag assignments on VCF 9.1.1 (the associations API in 1.4.0); it has not yet carried a complete production migration. Try it in a lab first, always run an import with `-DryRun` before the real one, and check the log. Use it at your own risk.
 
